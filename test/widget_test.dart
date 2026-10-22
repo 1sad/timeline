@@ -23,7 +23,7 @@ void main() {
     final DateTime today = startOfLocalDay(DateTime.now());
     final Track track = Track(id: 'work', name: 'Work', colorValue: 0xFF6F9DF0);
 
-    test('splits a block at local midnight', () {
+    test('keeps a block crossing midnight in one segment', () {
       final DateTime rangeStart = DateTime(
         today.year,
         today.month,
@@ -51,10 +51,60 @@ void main() {
         width: 720,
         trackOpen: <String, bool>{track.id: true},
       );
-      expect(layout.segments.length, 2);
-      expect(layout.segments[0].day, isNot(equals(layout.segments[1].day)));
-      expect(layout.segments[0].start, atLocalTime(today, 23, 0));
-      expect(layout.segments[1].end, atLocalTime(addLocalDays(today, 1), 1, 0));
+      expect(layout.segments, hasLength(1));
+      final TimelineSegment segment = layout.segments.single;
+      expect(segment.start, atLocalTime(today, 23, 0));
+      expect(segment.end, atLocalTime(addLocalDays(today, 1), 1, 0));
+      expect(segment.lane, 0);
+    });
+
+    test('keeps a cross-midnight lane stable when another block overlaps', () {
+      final DateTime rangeStart = DateTime(
+        today.year,
+        today.month,
+        today.day - 4,
+      );
+      final DateTime rangeEnd = DateTime(
+        today.year,
+        today.month,
+        today.day + 4,
+      );
+      final List<Block> blocks = <Block>[
+        Block(
+          id: 1,
+          trackId: track.id,
+          title: 'Evening',
+          start: atLocalTime(today, 23, 0),
+          end: atLocalTime(today, 23, 50),
+        ),
+        Block(
+          id: 2,
+          trackId: track.id,
+          title: 'Overnight',
+          start: atLocalTime(today, 23, 45),
+          end: atLocalTime(addLocalDays(today, 1), 1, 0),
+        ),
+      ];
+      final TimelineLayout layout = buildTimelineLayout(
+        tracks: <Track>[track],
+        blocks: blocks,
+        rangeStart: rangeStart,
+        rangeEnd: rangeEnd,
+        viewStart: today,
+        hours: 24,
+        width: 720,
+        trackOpen: <String, bool>{track.id: true},
+      );
+      final List<TimelineSegment> evening = layout.segments
+          .where((TimelineSegment segment) => segment.block.id == 1)
+          .toList();
+      final List<TimelineSegment> overnight = layout.segments
+          .where((TimelineSegment segment) => segment.block.id == 2)
+          .toList();
+      expect(evening, hasLength(1));
+      expect(overnight, hasLength(1));
+      expect(evening.single.lane, 0);
+      expect(overnight.single.lane, 1);
     });
 
     test('packs overlapping events and leaves free events in lane zero', () {
