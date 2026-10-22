@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:timeline/models.dart';
+import 'package:timeline/storage.dart';
 import 'package:timeline/store.dart';
 import 'package:timeline/theme.dart';
 import 'package:timeline/timeline_page.dart';
@@ -11,7 +12,9 @@ Future<TimelineStore> emptyStore() async {
     'timeline_data_v1':
         '{"tracks":[],"blocks":[],"templates":[],"trackOpen":{}}',
   });
-  final TimelineStore store = TimelineStore();
+  final TimelineStore store = TimelineStore(
+    storage: SharedPreferencesTimelineStorage(),
+  );
   await store.load();
   return store;
 }
