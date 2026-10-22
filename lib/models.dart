@@ -5,7 +5,18 @@ import 'package:flutter/material.dart';
 const int kHourMs = 60 * 60 * 1000;
 const int kDayMs = 24 * kHourMs;
 const int kTimelineDays = 8;
-const List<double> kZoomPresets = <double>[1, 3, 6, 12, 24, 72, 192];
+const List<double> kZoomSteps = <double>[1, 3, 6, 12, 24, 72];
+
+/// Zoom stops for a timeline whose full range is [maxHours] wide. The actual
+/// range is always the final stop. Fixed stops within an hour of it are
+/// dropped so daylight-saving changes cannot produce a duplicate 8d step.
+List<double> zoomPresetsFor(double maxHours) {
+  final List<double> presets = kZoomSteps
+      .where((double value) => value < maxHours - 1)
+      .toList();
+  presets.add(maxHours);
+  return presets;
+}
 
 /// All calendar maths in the app is done with local [DateTime] objects.
 /// Building the next midnight explicitly (instead of adding 24h) keeps day
