@@ -165,6 +165,29 @@ void main() {
     });
   });
 
+  group('zoom', () {
+    test('uses the actual range as a single final step', () {
+      for (final double maxHours in <double>[191, 192, 193, 194]) {
+        final List<double> presets = zoomPresetsFor(maxHours);
+        expect(presets.last, maxHours);
+        expect(
+          presets.where((double value) => (value - maxHours).abs() < .001),
+          hasLength(1),
+        );
+        expect(presets.toSet(), hasLength(presets.length));
+      }
+      expect(
+        zoomPresetsFor(192),
+        orderedEquals(<double>[1, 3, 6, 12, 24, 72, 192]),
+      );
+      expect(
+        zoomPresetsFor(193),
+        orderedEquals(<double>[1, 3, 6, 12, 24, 72, 193]),
+      );
+      expect(zoomPresetsFor(72), orderedEquals(<double>[1, 3, 6, 12, 24, 72]));
+    });
+  });
+
   group('store', () {
     test(
       'recurrence is materialized and edits keep series semantics',

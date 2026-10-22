@@ -83,15 +83,7 @@ class TimelinePageState extends State<TimelinePage> {
         kHourMs,
   );
 
-  /// The last preset is the actual range width, not a fixed 8 days. This
-  /// avoids a duplicate-looking 8d step when DST makes the range 191/193h.
-  List<double> get _zoomPresets {
-    final List<double> presets = kZoomPresets
-        .where((double value) => value < _maxHours - .01)
-        .toList();
-    presets.add(_maxHours);
-    return presets;
-  }
+  List<double> get _zoomPresets => zoomPresetsFor(_maxHours);
 
   DateTime _clampViewStart(DateTime start, double hours) {
     final int rangeMs =
