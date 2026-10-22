@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Timeline — design mockups</title>
+<link rel="stylesheet" href="mockups.css">
+<link rel="stylesheet" href="ef.css">
+<link rel="stylesheet" href="g.css">
+</head>
+<body>
+
+<header class="toolbar">
+  <div class="brand">Timeline <span>· design mockups</span></div>
+  <nav class="tabs" id="tabs">
+    <button class="tab on" data-variant="A">A · Two-tier</button>
+    <button class="tab" data-variant="B">B · Equal</button>
+    <button class="tab" data-variant="C">C · Full width</button>
+    <button class="tab" data-variant="D">D · Tray</button>
+    <button class="tab" data-variant="E" title="Header-first selection, no layout movement">E · Header first</button>
+    <button class="tab" data-variant="F" title="Selected bar expands in place">F · Expand in place</button>
+    <button class="tab" data-variant="G" title="Header-first with hideable track names">G · Your mix</button>
+  </nav>
+  <div class="spacer"></div>
+  <div class="hint" id="hint">drag empty space to scroll · ctrl+wheel to zoom</div>
+  <div class="seg" id="deviceSeg">
+    <button data-device="phone" class="on">Phone</button>
+    <button data-device="desktop">Desktop</button>
+  </div>
+</header>
+
+<main class="main">
+  <section class="stage" id="stage">
+
+    <div class="device-wrap" id="deviceWrap">
+      <div class="device phone" id="device" data-variant="A">
+        <div class="app">
+
+          <div class="statusbar">
+            <span id="sbTime">14:23</span>
+            <span class="sb-icons">▮▮▮ &nbsp;5G&nbsp; ▮</span>
+          </div>
+
+          <header class="appbar" id="appbar">
+            <div class="ab-left">
+              <div class="ab-title" id="abTitle">Timeline</div>
+              <div class="ab-sub" id="abSub">Wed 21 Oct</div>
+            </div>
+            <div class="ab-actions">
+              <button class="iconbtn" id="editBtn" title="Edit exact times" hidden>✎</button>
+              <button class="iconbtn" id="undoBtn" title="Undo">↶</button>
+              <button class="iconbtn" id="lockBtn" title="Lock layout">🔓</button>
+              <button class="nowbtn" id="nowBtn">Now</button>
+            </div>
+          </header>
+
+          <div class="viewbar" id="viewBar" hidden>
+            <div class="density" id="densitySeg" role="group" aria-label="View density">
+              <button data-density="normal" class="on">Normal</button>
+              <button data-density="compact">Compact</button>
+            </div>
+            <span class="viewnote" id="viewNote">all tracks open</span>
+            <button class="vb-btn" id="tracksBtn" hidden>▤ Tracks</button>
+            <button class="vb-btn" id="collapseAll">Collapse all</button>
+            <button class="vb-btn" id="expandAll" hidden>Expand all</button>
+          </div>
+
+          <div class="viewport">
+            <div class="rulerwrap">
+              <div class="gutter ruler-gutter"></div>
+              <div class="ruler" id="ruler"></div>
+            </div>
+            <div class="bodywrap">
+              <div class="gutter guttercol" id="gutterCol"></div>
+              <div class="canvas" id="canvas">
+                <div class="layer" id="bgLayer"></div>
+                <div class="layer rows" id="rows"></div>
+                <div class="layer" id="pastLayer"></div>
+                <div class="layer" id="nowLayer"></div>
+              </div>
+            </div>
+            <div class="minimapwrap">
+              <div class="gutter mm-gutter">
+                <button class="g-edit" id="gEditBtn" title="Edit categories" hidden>✎ Edit</button>
+              </div>
+              <div class="minimap" id="minimap"></div>
+            </div>
+          </div>
+
+          <footer class="bottombar">
+            <div class="bottom-left">
+              <button class="ghost g-bottom-btn" id="gTracksBtn" title="Hide track names" aria-label="Hide track names" hidden>
+                <svg class="ico" viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="3.5" y="4.5" width="17" height="15" rx="2.6"></rect>
+                  <path d="M9.2 4.5v15"></path>
+                  <path d="M5.9 8.4h.1M5.9 12h.1M5.9 15.6h.1"></path>
+                </svg>
+              </button>
+              <button class="ghost g-bottom-btn" id="gCollapseBtn" title="Collapse all tracks" aria-label="Collapse all tracks" aria-expanded="true" hidden>
+                <svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M6.5 9.5 12 15l5.5-5.5"></path>
+                </svg>
+              </button>
+            </div>
+            <div class="zoomctl" aria-label="Timeline zoom">
+              <button id="zoomOut" title="Zoom out">−</button>
+              <span id="zoomLabel">8h</span>
+              <button id="zoomIn" title="Zoom in">＋</button>
+            </div>
+            <div class="bottom-right">
+              <button class="ghost" id="tplBtn">Templates</button>
+              <button class="primary" id="addBtn" title="New block">NEW</button>
+            </div>
+          </footer>
+
+          <div class="modal-root" id="modalRoot"></div>
+
+        </div>
+      </div>
+    </div>
+
+    <div class="tray-scene" id="trayScene" hidden>
+      <div class="wallpaper"></div>
+      <div class="tray-popup">
+        <div class="tp-head">
+          <span class="tp-brand">Timeline</span>
+          <span class="tp-date" id="tpDate">Wed 21 Oct · 14:23</span>
+        </div>
+        <div class="tp-now">
+          <div class="tp-label">NOW</div>
+          <div class="tp-title">Deep work</div>
+          <div class="tp-meta">52m in · 1h 08m left</div>
+          <div class="tp-bar"><i style="width:43%"></i></div>
+        </div>
+        <div class="tp-next">
+          <div class="tp-label">NEXT</div>
+          <div class="tp-row"><span class="dot" style="--c:#d9a05b"></span><span class="t">Lunch</span><span class="m">13:00 · 35m</span></div>
+          <div class="tp-row"><span class="dot" style="--c:#6f9df0"></span><span class="t">Admin</span><span class="m">14:00 · 3h</span></div>
+          <div class="tp-row"><span class="dot" style="--c:#72c39a"></span><span class="t">Walk</span><span class="m">18:00 · 45m</span></div>
+        </div>
+        <div class="tp-foot">
+          <button class="tp-open">Open timeline</button>
+          <button class="tp-add">＋ Quick add</button>
+        </div>
+      </div>
+      <div class="taskbar">
+        <div class="tb-start">⊞</div>
+        <div class="tb-items">
+          <span class="tb-app">▤</span>
+          <span class="tb-app">◧</span>
+          <span class="tb-app on">▦</span>
+        </div>
+        <div class="tb-tray">
+          <span>▲</span><span>◔</span><span id="tbClock">14:23</span>
+        </div>
+      </div>
+    </div>
+
+  </section>
+
+  <aside class="notes" id="notes"></aside>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script src="data.js"></script>
+<script src="app.js"></script>
+<script src="interact.js"></script>
+<script src="ef.js"></script>
+<script src="ef-ui.js"></script>
+<script src="g.js"></script>
+</body>
+</html>

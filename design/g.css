@@ -1,0 +1,88 @@
+/* ============================================================
+   Variant G — E's header-first selection, plus a Tracks button
+   that hides the name column and leaves a 3px colour sliver.
+   Streamlined: no second row; two icon controls and a centered
+   zoom selector live in the bottom bar. Categories edit sits at
+   the foot of the name column and disappears with it.
+   ============================================================ */
+
+/* G behaves like E for vertical scrolling and track sizing. */
+.device[data-variant="G"] .app { --gutter: 80px; }
+
+.device[data-variant="G"] .bodywrap {
+  overflow-y: auto; overflow-x: hidden; align-items: flex-start;
+  scrollbar-gutter: stable; scrollbar-width: thin;
+  scrollbar-color: #394250 transparent;
+}
+.device[data-variant="G"] .bodywrap::-webkit-scrollbar { width: 8px; }
+.device[data-variant="G"] .bodywrap::-webkit-scrollbar-thumb {
+  background: #394250; border-radius: 4px;
+}
+.device[data-variant="G"] .bodywrap::-webkit-scrollbar-track { background: transparent; }
+.device[data-variant="G"] .guttercol { touch-action: pan-y; }
+
+/* The whole second row is gone in G. */
+.device[data-variant="G"] .viewbar { display: none; }
+
+/* ---------- bottom bar: two icon buttons · centered zoom · NEW ---------- */
+.device[data-variant="G"] .bottombar { gap: 0; padding: 0 10px; }
+
+.device[data-variant="G"] .bottom-left {
+  flex: 0 0 78px; width: 78px; gap: 0; height: 36px;
+  background: var(--panel2); border: 1px solid #2b323d; border-radius: 10px;
+  overflow: hidden;
+}
+.device[data-variant="G"] .bottom-right {
+  flex: 0 0 78px; width: 78px; margin-left: auto; justify-content: flex-end;
+}
+.device[data-variant="G"] #tplBtn { display: none; }
+
+.device[data-variant="G"] .g-bottom-btn {
+  flex: 1 1 50%; height: 34px; min-width: 0; width: auto; padding: 0;
+  border: 0; border-radius: 0; background: transparent; color: #aab4c4;
+  display: flex; align-items: center; justify-content: center;
+}
+.device[data-variant="G"] #gTracksBtn { border-right: 1px solid #2b323d; }
+.device[data-variant="G"] .g-bottom-btn:hover { background: #242b36; color: #e0e6f0; }
+.device[data-variant="G"] .g-bottom-btn.on {
+  background: rgba(122, 162, 255, .17);
+  color: #c9d8ff;
+}
+.device[data-variant="G"] .g-bottom-btn:disabled { opacity: .42; cursor: default; }
+.device[data-variant="G"] .g-bottom-btn .ico {
+  width: 17px; height: 17px; fill: none; stroke: currentColor;
+  stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
+}
+.device[data-variant="G"] .g-bottom-btn .chev { transition: transform .16s ease; }
+.device[data-variant="G"] #gCollapseBtn.closed .chev { transform: rotate(180deg); }
+
+/* The time-scale selector is centered independently of the side groups. */
+.device[data-variant="G"] .zoomctl {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  margin: 0; z-index: 2;
+}
+
+.device[data-variant="G"] #addBtn {
+  width: 78px; min-width: 78px; height: 36px; padding: 0 10px;
+  border-radius: 10px; font-size: 11.5px; letter-spacing: .1px;
+}
+
+/* ---------- Edit categories, at the foot of the name column ---------- */
+.device[data-variant="G"] .mm-gutter { padding: 0; }
+.device[data-variant="G"] .g-edit {
+  width: 64px; height: 28px; border-radius: 8px;
+  font-size: 10px; color: #aab4c4;
+  background: #1a1f28; border: 1px solid #2b323d;
+}
+.device[data-variant="G"] .g-edit:hover { background: #242b36; color: #dfe5ef; }
+
+/* ---------- Tracks hidden: no name column; the edit button goes too ---------- */
+.device[data-variant="G"][data-names="hidden"] .app { --gutter: 0px; }
+.device[data-variant="G"][data-names="hidden"] .ruler-gutter,
+.device[data-variant="G"][data-names="hidden"] .guttercol,
+.device[data-variant="G"][data-names="hidden"] .mm-gutter { display: none; }
+.device[data-variant="G"][data-names="hidden"] .row::before {
+  content: ""; position: absolute; left: 0; top: 0; bottom: 0;
+  width: 3px; background: var(--c, #77808f); opacity: .95; z-index: 3;
+}
+.device[data-variant="G"][data-names="hidden"] .emptyhint { display: none; }
