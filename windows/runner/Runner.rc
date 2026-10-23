@@ -89,13 +89,13 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
-            VALUE "CompanyName", "com.j10n3" "\0"
-            VALUE "FileDescription", "timeline" "\0"
+            VALUE "CompanyName", "1sad" "\0"
+            VALUE "FileDescription", "Timeline" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
             VALUE "InternalName", "timeline" "\0"
-            VALUE "LegalCopyright", "Copyright (C) 2026 com.j10n3. All rights reserved." "\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 1sad" "\0"
             VALUE "OriginalFilename", "timeline.exe" "\0"
-            VALUE "ProductName", "timeline" "\0"
+            VALUE "ProductName", "Timeline" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END

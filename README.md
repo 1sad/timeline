@@ -38,6 +38,10 @@ flutter run -d <device-id>
 flutter build apk --release
 ```
 
+## Releases
+
+Prebuilt Windows and Android packages are available on the [releases page](https://github.com/1sad/timeline/releases). The Windows package is portable: extract it and run `timeline.exe`. No installer is required, and only one Windows instance can run at a time.
+
 ## Data
 
 On Windows, Timeline stores its data in `timeline-data/timeline_data.json` beside `timeline.exe`. Keep the extracted folder together and it can be moved or backed up as a portable app. If that folder is read-only, Timeline falls back to the per-user application data directory.
