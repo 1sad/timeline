@@ -371,15 +371,14 @@ class Template {
   );
 }
 
-/// A block clipped to one local calendar day. A block crossing midnight is
-/// drawn as two segments, one per day, which is what lets lanes reset daily.
+/// A block clipped to the timeline range. Blocks crossing midnight remain a
+/// single segment so their lane and geometry stay stable across day changes.
 class TimelineSegment {
   TimelineSegment({
     required this.block,
     required this.trackId,
     required this.start,
     required this.end,
-    required this.day,
     required this.isZone,
     this.lane = 0,
   });
@@ -388,7 +387,6 @@ class TimelineSegment {
   final String trackId;
   final DateTime start;
   final DateTime end;
-  final DateTime day;
   final bool isZone;
   int lane;
 }
@@ -519,9 +517,9 @@ class TimelineLayout {
   }
 }
 
-/// Computes lanes independently for every track + local day + block shape.
-/// The row height takes the worst day in the whole eight-day range, so rows
-/// never grow or shrink while the user pans.
+/// Computes lanes for each track and block shape across the whole range. The
+/// row height takes the worst overlap in the range, so rows never grow or
+/// shrink while the user pans.
 TimelineLayout buildTimelineLayout({
   required List<Track> tracks,
   required List<Block> blocks,
@@ -542,35 +540,21 @@ TimelineLayout buildTimelineLayout({
         ? rangeEnd
         : block.end;
     if (!clippedEnd.isAfter(clippedStart)) continue;
-
-    DateTime cursor = clippedStart;
-    while (cursor.isBefore(clippedEnd)) {
-      final DateTime day = startOfLocalDay(cursor);
-      final DateTime nextDay = DateTime(day.year, day.month, day.day + 1);
-      final DateTime segmentEnd = clippedEnd.isBefore(nextDay)
-          ? clippedEnd
-          : nextDay;
-      if (!segmentEnd.isAfter(cursor)) break;
-      all.add(
-        TimelineSegment(
-          block: block,
-          trackId: block.trackId,
-          start: cursor,
-          end: segmentEnd,
-          day: day,
-          isZone: block.isZone,
-        ),
-      );
-      cursor = segmentEnd;
-    }
+    all.add(
+      TimelineSegment(
+        block: block,
+        trackId: block.trackId,
+        start: clippedStart,
+        end: clippedEnd,
+        isZone: block.isZone,
+      ),
+    );
   }
 
   final Map<String, List<TimelineSegment>> groups =
       <String, List<TimelineSegment>>{};
   for (final TimelineSegment segment in all) {
-    final String key =
-        '${segment.trackId}|${segment.day.year}-'
-        '${segment.day.month}-${segment.day.day}|${segment.isZone}';
+    final String key = '${segment.trackId}|${segment.isZone}';
     groups.putIfAbsent(key, () => <TimelineSegment>[]).add(segment);
   }
 
