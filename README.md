@@ -40,7 +40,9 @@ flutter build apk --release
 
 ## Data
 
-Timeline stores its data locally with `shared_preferences`. Use the in-app JSON export and import to back up data or move it between devices. There is no cloud sync.
+On Windows, Timeline stores its data in `timeline-data/timeline_data.json` beside `timeline.exe`. Keep the extracted folder together and it can be moved or backed up as a portable app. If that folder is read-only, Timeline falls back to the per-user application data directory.
+
+On Android, data stays in the app's private storage. Use the in-app JSON export and import to back up data or move it between devices. There is no cloud sync.
 
 ## Development
 

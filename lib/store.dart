@@ -3,11 +3,10 @@ import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 import 'models.dart';
+import 'storage.dart';
 
-const String _storageKey = 'timeline_data_v1';
 const String _uncatId = 'uncat';
 const int _uncatColor = 0xFF7C8698;
 
@@ -59,7 +58,9 @@ class ImportResult {
 }
 
 class TimelineStore extends ChangeNotifier {
-  TimelineStore() {
+  TimelineStore({TimelineStorage? storage}) : this._(storage);
+
+  TimelineStore._(this._storage) {
     final DateTime now = DateTime.now();
     timelineStart = DateTime(now.year, now.month, now.day - 4);
     timelineEnd = DateTime(now.year, now.month, now.day + 4);
@@ -81,7 +82,7 @@ class TimelineStore extends ChangeNotifier {
   int _nextTrackId = 1;
   int _nextTemplateId = 1;
   Timer? _saveTimer;
-  SharedPreferences? _prefs;
+  TimelineStorage? _storage;
 
   bool get hasUndo => undoStack.isNotEmpty;
   int get maxUndo => 30;
@@ -138,9 +139,9 @@ class TimelineStore extends ChangeNotifier {
     return upcoming.take(limit).toList(growable: false);
   }
 
-  Future<void> load({SharedPreferences? preferences}) async {
-    _prefs = preferences ?? await SharedPreferences.getInstance();
-    final String? raw = _prefs!.getString(_storageKey);
+  Future<void> load({TimelineStorage? storage}) async {
+    _storage = storage ?? _storage ?? await createDefaultTimelineStorage();
+    final String? raw = await _storage!.read();
     if (raw != null) {
       try {
         final Object? decoded = jsonDecode(raw);
@@ -800,11 +801,9 @@ class TimelineStore extends ChangeNotifier {
   Future<void> flush() async {
     _saveTimer?.cancel();
     _saveTimer = null;
-    final SharedPreferences prefs =
-        _prefs ?? await SharedPreferences.getInstance();
-    _prefs = prefs;
-    await prefs.setString(
-      _storageKey,
+    final TimelineStorage storage = _storage ??=
+        await createDefaultTimelineStorage();
+    await storage.write(
       jsonEncode(<String, dynamic>{
         'tracks': tracks.map((Track track) => track.toJson()).toList(),
         'blocks': blocks.map((Block block) => block.toJson()).toList(),
