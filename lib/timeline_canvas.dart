@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -15,11 +17,16 @@ class TimelineCanvas extends StatefulWidget {
     required this.layout,
     required this.contentHeight,
     required this.store,
-    required this.selectedId,
+    required this.selectedIds,
+    required this.primarySelectedId,
+    required this.selectionMode,
     required this.now,
     required this.showNames,
     required this.scrollController,
     required this.onSelect,
+    required this.onClearSelection,
+    required this.onMarqueeSelect,
+    required this.onLongPressSelect,
     required this.onEdit,
     required this.onViewport,
     required this.onToast,
@@ -28,11 +35,16 @@ class TimelineCanvas extends StatefulWidget {
   final TimelineLayout layout;
   final double contentHeight;
   final TimelineStore store;
-  final int? selectedId;
+  final Set<int> selectedIds;
+  final int? primarySelectedId;
+  final bool selectionMode;
   final DateTime now;
   final bool showNames;
   final ScrollController scrollController;
-  final ValueChanged<int?> onSelect;
+  final void Function(int id, {required bool toggle}) onSelect;
+  final VoidCallback onClearSelection;
+  final void Function(Set<int> ids, {required bool additive}) onMarqueeSelect;
+  final ValueChanged<int> onLongPressSelect;
   final ValueChanged<Block> onEdit;
   final void Function(DateTime start, double hours) onViewport;
   final ValueChanged<String> onToast;
@@ -49,6 +61,7 @@ enum _Interaction {
   resizeRight,
   pan,
   pinch,
+  marquee,
 }
 
 class _TimelineCanvasState extends State<TimelineCanvas> {
@@ -61,10 +74,19 @@ class _TimelineCanvasState extends State<TimelineCanvas> {
   DateTime? _lastTapAt;
 
   Block? _dragBlock;
+  Set<int> _dragIds = <int>{};
+  bool _dragVertical = false;
+  Map<int, int> _dragLanes = <int, int>{};
   UndoState? _before;
   DateTime? _originalStart;
   DateTime? _originalEnd;
   double _dragPxPerHour = 1;
+  Offset? _marqueeStart;
+  Rect? _marqueeRect;
+  bool _marqueeAdditive = false;
+  Timer? _longPressTimer;
+  bool _longPressTriggered = false;
+  bool _pointerStartedOnSelected = false;
 
   DateTime? _panStartView;
   double _panStartHours = 24;
@@ -155,15 +177,17 @@ class _TimelineCanvasState extends State<TimelineCanvas> {
             rect: rect,
             track: track,
             now: widget.now,
-            selected: widget.selectedId == segment.block.id,
+            selected: widget.selectedIds.contains(segment.block.id),
             collapsed: metric.collapsed,
           ),
         ),
       );
     }
 
-    final int? selectedId = widget.selectedId;
-    if (selectedId != null) {
+    final int? selectedId = widget.selectedIds.length == 1
+        ? widget.selectedIds.single
+        : null;
+    if (selectedId != null && !widget.store.locked) {
       final Block? block = widget.store.blockById(selectedId);
       if (block != null) {
         final List<TimelineSegment> parts = widget.layout.segments
@@ -264,6 +288,26 @@ class _TimelineCanvasState extends State<TimelineCanvas> {
       );
     }
 
+    final Rect? marquee = _marqueeRect;
+    if (marquee != null) {
+      children.add(
+        Positioned.fromRect(
+          rect: marquee,
+          child: IgnorePointer(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: AppColors.alpha(AppColors.accent, .12),
+                border: Border.all(
+                  color: AppColors.alpha(AppColors.accent, .8),
+                ),
+                borderRadius: BorderRadius.circular(3),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
     children.add(
       Positioned.fill(
         child: MouseRegion(
@@ -304,22 +348,30 @@ class _TimelineCanvasState extends State<TimelineCanvas> {
     _down = event.localPosition;
     _downWasEmpty = false;
     _dragBlock = null;
+    _dragIds = <int>{};
     _before = null;
     _panAxis = 0;
+    _longPressTriggered = false;
+    _pointerStartedOnSelected = false;
+    _cancelLongPress();
 
     final Offset position = event.localPosition;
+    final int? singleSelected = widget.selectedIds.length == 1
+        ? widget.selectedIds.single
+        : null;
     final ({TimelineSegment segment, bool left})? handle = widget.store.locked
         ? null
-        : widget.layout.hitHandle(position, widget.selectedId);
+        : widget.layout.hitHandle(position, singleSelected);
     if (handle != null) {
       final Block block = handle.segment.block;
       _dragBlock = block;
+      _dragIds = <int>{block.id};
       _originalStart = block.start;
       _originalEnd = block.end;
       _dragPxPerHour = widget.layout.pxPerHour;
       _before = widget.store.captureState();
       _mode = handle.left ? _Interaction.resizeLeft : _Interaction.resizeRight;
-      widget.onSelect(block.id);
+      widget.onSelect(block.id, toggle: false);
       return;
     }
 
@@ -330,7 +382,27 @@ class _TimelineCanvasState extends State<TimelineCanvas> {
       _originalStart = block.start;
       _originalEnd = block.end;
       _dragPxPerHour = widget.layout.pxPerHour;
-      widget.onSelect(block.id);
+      _dragIds = Set<int>.of(widget.selectedIds);
+      _pointerStartedOnSelected = _dragIds.contains(block.id);
+      final bool additive =
+          HardwareKeyboard.instance.isControlPressed ||
+          HardwareKeyboard.instance.isMetaPressed ||
+          (widget.selectionMode &&
+              defaultTargetPlatform == TargetPlatform.android);
+      if (additive) {
+        widget.onSelect(block.id, toggle: true);
+        _dragBlock = null;
+        return;
+      }
+      if (!_pointerStartedOnSelected) {
+        _dragIds = <int>{block.id};
+        widget.onSelect(block.id, toggle: false);
+      }
+      _dragVertical = _selectionAllowsVertical(_dragIds);
+      _dragLanes = <int, int>{
+        for (final TimelineSegment item in widget.layout.segments)
+          item.block.id: item.lane,
+      };
 
       final DateTime now = DateTime.now();
       final bool doubleTap =
@@ -346,11 +418,22 @@ class _TimelineCanvasState extends State<TimelineCanvas> {
       }
       if (!widget.store.locked) {
         _mode = _Interaction.pendingBlock;
+        _startLongPress(block.id, event);
+      } else if (defaultTargetPlatform == TargetPlatform.android &&
+          event.kind != PointerDeviceKind.mouse) {
+        _startLongPress(block.id, event);
       }
       return;
     }
 
     _downWasEmpty = true;
+    if (HardwareKeyboard.instance.isShiftPressed) {
+      _mode = _Interaction.marquee;
+      _marqueeStart = position;
+      _marqueeRect = Rect.fromPoints(position, position);
+      _marqueeAdditive = HardwareKeyboard.instance.isControlPressed;
+      return;
+    }
     _mode = _Interaction.pan;
     _panStartView = widget.layout.viewStart;
     _panStartHours = widget.layout.hours;
@@ -360,7 +443,41 @@ class _TimelineCanvasState extends State<TimelineCanvas> {
         : 0;
   }
 
+  bool _selectionAllowsVertical(Set<int> ids) {
+    if (ids.isEmpty) return false;
+    final List<Block> selected = widget.store.blocks
+        .where((Block block) => ids.contains(block.id))
+        .toList(growable: false);
+    if (selected.isEmpty) return false;
+    final String trackId = selected.first.trackId;
+    final bool zone = selected.first.isZone;
+    return selected.every(
+      (Block block) => block.trackId == trackId && block.isZone == zone,
+    );
+  }
+
+  void _startLongPress(int blockId, PointerDownEvent event) {
+    if (event.kind == PointerDeviceKind.mouse ||
+        defaultTargetPlatform != TargetPlatform.android) {
+      return;
+    }
+    _longPressTimer = Timer(const Duration(milliseconds: 420), () {
+      if (!mounted) return;
+      _longPressTriggered = true;
+      _mode = _Interaction.none;
+      _cancelLongPress();
+      HapticFeedback.mediumImpact();
+      widget.onLongPressSelect(blockId);
+    });
+  }
+
+  void _cancelLongPress() {
+    _longPressTimer?.cancel();
+    _longPressTimer = null;
+  }
+
   void _startPinch() {
+    _cancelLongPress();
     if (_mode == _Interaction.move ||
         _mode == _Interaction.resizeLeft ||
         _mode == _Interaction.resizeRight) {
@@ -396,16 +513,34 @@ class _TimelineCanvasState extends State<TimelineCanvas> {
     final double distance = delta.distance;
     final double threshold = event.kind == PointerDeviceKind.mouse ? 4 : 8;
 
+    if (_mode == _Interaction.marquee) {
+      final Offset start = _marqueeStart ?? _down!;
+      setState(() {
+        _marqueeRect = Rect.fromPoints(start, event.localPosition);
+      });
+      return;
+    }
+
+    if (_longPressTimer != null && distance > threshold) {
+      _cancelLongPress();
+    }
+
     if (_mode == _Interaction.pendingBlock) {
       if (distance < threshold) return;
       _mode = _Interaction.move;
       _moved = true;
       _before ??= widget.store.captureState();
+      final Set<int> ids = _dragIds.isEmpty ? <int>{_dragBlock!.id} : _dragIds;
+      widget.store.beginGroupMove(
+        ids,
+        lanes: _dragLanes,
+        allowVertical: _dragVertical,
+      );
     }
 
     if (_mode == _Interaction.move) {
       _moved = true;
-      _moveBlock(delta.dx);
+      _moveSelection(delta.dx, _dragVertical ? delta.dy : 0);
       return;
     }
     if (_mode == _Interaction.resizeLeft) {
@@ -470,7 +605,7 @@ class _TimelineCanvasState extends State<TimelineCanvas> {
     );
   }
 
-  void _moveBlock(double dx) {
+  void _moveSelection(double dx, double dy) {
     final Block? block = _dragBlock;
     if (block == null || _originalStart == null || _originalEnd == null) return;
     final Duration duration = _originalEnd!.difference(_originalStart!);
@@ -485,11 +620,15 @@ class _TimelineCanvasState extends State<TimelineCanvas> {
       start = rangeEnd.subtract(duration);
     }
     if (start.isBefore(rangeStart)) start = rangeStart;
-    widget.store.moveBlockLive(
-      block.id,
-      start,
-      start.add(duration),
-      resize: false,
+
+    int laneDelta = 0;
+    if (_dragVertical) {
+      final double laneHeight = block.isZone ? 18 : 42;
+      laneDelta = (dy / math.max(1, laneHeight)).round();
+    }
+    widget.store.updateGroupMove(
+      deltaMs: start.difference(_originalStart!).inMilliseconds,
+      laneDelta: laneDelta,
     );
   }
 
@@ -535,11 +674,27 @@ class _TimelineCanvasState extends State<TimelineCanvas> {
 
   void _onPointerUp(PointerUpEvent event) {
     _pointers.remove(event.pointer);
+    _cancelLongPress();
     if (_mode == _Interaction.pinch) {
       if (_pointers.length < 2) {
         _mode = _Interaction.none;
         _moved = false;
       }
+      return;
+    }
+    if (_mode == _Interaction.marquee) {
+      final Rect? rect = _marqueeRect;
+      if (rect != null && rect.width > 3 && rect.height > 3) {
+        final Set<int> ids = <int>{};
+        for (final TimelineSegment segment in widget.layout.segments) {
+          if (!widget.layout.isVisible(segment.start, segment.end)) continue;
+          if (widget.layout.segmentRect(segment).overlaps(rect)) {
+            ids.add(segment.block.id);
+          }
+        }
+        widget.onMarqueeSelect(ids, additive: _marqueeAdditive);
+      }
+      _resetInteraction();
       return;
     }
     if (_mode == _Interaction.move ||
@@ -549,14 +704,23 @@ class _TimelineCanvasState extends State<TimelineCanvas> {
       _resetInteraction();
       return;
     }
+    if (_mode == _Interaction.pendingBlock &&
+        !_moved &&
+        !_longPressTriggered &&
+        _pointerStartedOnSelected &&
+        widget.selectedIds.length > 1 &&
+        _dragBlock != null) {
+      widget.onSelect(_dragBlock!.id, toggle: false);
+    }
     if (_mode == _Interaction.pan && !_moved && _downWasEmpty) {
-      widget.onSelect(null);
+      widget.onClearSelection();
     }
     _resetInteraction();
   }
 
   void _onPointerCancel(PointerCancelEvent event) {
     _pointers.remove(event.pointer);
+    _cancelLongPress();
     if (_mode == _Interaction.pinch) {
       _mode = _Interaction.none;
       return;
@@ -578,13 +742,17 @@ class _TimelineCanvasState extends State<TimelineCanvas> {
     if (current == null) return;
     final bool resizing =
         _mode == _Interaction.resizeLeft || _mode == _Interaction.resizeRight;
+    final int count = _dragIds.isEmpty ? 1 : _dragIds.length;
     final String label = resizing
         ? 'Resized “${current.title}”'
+        : count > 1
+        ? 'Moved $count blocks'
         : 'Moved “${current.title}”';
     widget.store.recordUndoState(before, label);
     widget.store.finishLiveChange();
     widget.onToast(
-      '${resizing ? 'Resized' : 'Moved'} “${current.title}” · '
+      '${resizing ? 'Resized' : 'Moved'} '
+      '${count > 1 ? '$count blocks' : '“${current.title}”'} · '
       '${fmtTime(current.start)}–${fmtTime(current.end)}',
     );
   }
@@ -594,8 +762,22 @@ class _TimelineCanvasState extends State<TimelineCanvas> {
     _moved = false;
     _down = null;
     _dragBlock = null;
+    _dragIds = <int>{};
+    _dragVertical = false;
+    _dragLanes = <int, int>{};
     _before = null;
     _downWasEmpty = false;
+    _pointerStartedOnSelected = false;
+    _cancelLongPress();
+    if (_marqueeRect != null && mounted) {
+      setState(() {
+        _marqueeRect = null;
+        _marqueeStart = null;
+      });
+    } else {
+      _marqueeRect = null;
+      _marqueeStart = null;
+    }
   }
 
   void _onPointerSignal(PointerSignalEvent event) {

@@ -19,7 +19,13 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   final TimelineStore store = TimelineStore();
-  await store.load();
+  try {
+    await store.load();
+  } catch (error, stack) {
+    debugPrint('Timeline startup failed: $error\n$stack');
+    runApp(TimelineStartupError(error: error));
+    return;
+  }
 
   final NotificationService notifications = NotificationService();
   await notifications.initialize();
@@ -62,6 +68,74 @@ class TimelineApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: buildTimelineTheme(),
       home: AppShell(store: store, notifications: notifications),
+    );
+  }
+}
+
+class TimelineStartupError extends StatelessWidget {
+  const TimelineStartupError({super.key, required this.error});
+
+  final Object error;
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Timeline',
+      debugShowCheckedModeBanner: false,
+      theme: buildTimelineTheme(),
+      home: Scaffold(
+        backgroundColor: AppColors.bg,
+        body: SafeArea(
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 420),
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    const Icon(
+                      Icons.error_outline,
+                      size: 36,
+                      color: AppColors.danger,
+                    ),
+                    const SizedBox(height: 14),
+                    const Text(
+                      'Timeline could not start',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w600,
+                        color: AppColors.text,
+                      ),
+                    ),
+                    const SizedBox(height: 7),
+                    const Text(
+                      'Your data has not been changed. Please restart the app. '
+                      'If this keeps happening, reinstall the latest build.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 12,
+                        height: 1.45,
+                        color: AppColors.muted,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    SelectableText(
+                      '$error',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        fontSize: 10,
+                        height: 1.35,
+                        color: AppColors.faint,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

@@ -230,6 +230,7 @@ class Block {
     this.alarm = false,
     this.repeat = Recurrence.none,
     this.seriesId,
+    this.lane,
   });
 
   int id;
@@ -241,6 +242,10 @@ class Block {
   bool alarm;
   Recurrence repeat;
   int? seriesId;
+
+  /// Explicit vertical lane. Null means the block has never been positioned
+  /// vertically and the layout may pack it automatically.
+  int? lane;
 
   bool get isZone => kind == BlockKind.zone;
   Duration get duration => end.difference(start);
@@ -257,6 +262,8 @@ class Block {
     Recurrence? repeat,
     int? seriesId,
     bool clearSeriesId = false,
+    int? lane,
+    bool clearLane = false,
   }) => Block(
     id: id ?? this.id,
     trackId: trackId ?? this.trackId,
@@ -267,6 +274,7 @@ class Block {
     alarm: alarm ?? this.alarm,
     repeat: repeat ?? this.repeat,
     seriesId: clearSeriesId ? null : (seriesId ?? this.seriesId),
+    lane: clearLane ? null : (lane ?? this.lane),
   );
 
   Map<String, dynamic> toJson() => <String, dynamic>{
@@ -279,6 +287,7 @@ class Block {
     if (alarm) 'alarm': true,
     if (repeat != Recurrence.none) 'repeat': repeat.value,
     if (seriesId != null) 'seriesId': seriesId,
+    if (lane != null) 'lane': lane,
   };
 
   /// Tolerant parser used by JSON import. It intentionally accepts both the
@@ -304,6 +313,9 @@ class Block {
       seriesId: json['seriesId'] is num
           ? (json['seriesId'] as num).toInt()
           : int.tryParse('${json['seriesId'] ?? ''}'),
+      lane: json['lane'] is num
+          ? math.max(0, (json['lane'] as num).toInt())
+          : int.tryParse('${json['lane'] ?? ''}'),
     );
   }
 }
@@ -325,6 +337,49 @@ int _jsonInt(Object? value, int fallback) {
   return int.tryParse('${value ?? ''}') ?? fallback;
 }
 
+class TemplatePart {
+  TemplatePart({
+    required this.title,
+    required this.trackId,
+    required this.offsetMinutes,
+    required this.durationMinutes,
+    this.kind = BlockKind.event,
+    this.alarm = false,
+    this.repeat = Recurrence.none,
+  });
+
+  final String title;
+  final String trackId;
+  final int offsetMinutes;
+  final int durationMinutes;
+  final BlockKind kind;
+  final bool alarm;
+  final Recurrence repeat;
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+    'title': title,
+    'track': trackId,
+    'offsetMinutes': offsetMinutes,
+    'durationMinutes': durationMinutes,
+    if (kind == BlockKind.zone) 'type': 'zone',
+    if (alarm) 'alarm': true,
+    if (repeat != Recurrence.none) 'repeat': repeat.value,
+  };
+
+  factory TemplatePart.fromJson(Map<String, dynamic> json) => TemplatePart(
+    title: (json['title'] ?? 'Untitled').toString(),
+    trackId: (json['track'] ?? json['trackId'] ?? 'uncat').toString(),
+    offsetMinutes: _jsonInt(json['offsetMinutes'], 0),
+    durationMinutes: math.max(
+      1,
+      _jsonInt(json['durationMinutes'] ?? json['minutes'], 60),
+    ),
+    kind: BlockKindJson.parse(json['type'] ?? json['kind']),
+    alarm: json['alarm'] == true,
+    repeat: RecurrenceJson.parse(json['repeat']),
+  );
+}
+
 class Template {
   Template({
     required this.id,
@@ -334,6 +389,7 @@ class Template {
     this.kind = BlockKind.event,
     this.alarm = false,
     this.repeat = Recurrence.none,
+    this.parts = const <TemplatePart>[],
   });
 
   final int id;
@@ -344,6 +400,13 @@ class Template {
   final bool alarm;
   final Recurrence repeat;
 
+  /// Empty for a legacy single-block template. A multi-block selection has one
+  /// part per block, with offsets measured from the earliest selected start.
+  final List<TemplatePart> parts;
+
+  bool get isMulti => parts.length > 1;
+  int get blockCount => parts.isEmpty ? 1 : parts.length;
+
   Map<String, dynamic> toJson() => <String, dynamic>{
     'id': id,
     'title': title,
@@ -352,23 +415,39 @@ class Template {
     if (kind == BlockKind.zone) 'type': 'zone',
     if (alarm) 'alarm': true,
     if (repeat != Recurrence.none) 'repeat': repeat.value,
+    if (parts.isNotEmpty)
+      'parts': parts.map((TemplatePart part) => part.toJson()).toList(),
   };
 
   factory Template.fromJson(
     Map<String, dynamic> json, {
     required int fallbackId,
-  }) => Template(
-    id: _jsonInt(json['id'], fallbackId),
-    title: (json['title'] ?? 'Untitled').toString(),
-    trackId: (json['track'] ?? json['trackId'] ?? 'uncat').toString(),
-    durationMinutes: math.max(
-      1,
-      _jsonInt(json['durationMinutes'] ?? json['minutes'], 60),
-    ),
-    kind: BlockKindJson.parse(json['type'] ?? json['kind']),
-    alarm: json['alarm'] == true,
-    repeat: RecurrenceJson.parse(json['repeat']),
-  );
+  }) {
+    final List<TemplatePart> parts = <TemplatePart>[];
+    final Object? rawParts = json['parts'];
+    if (rawParts is List) {
+      for (final Object? item in rawParts) {
+        if (item is Map) {
+          try {
+            parts.add(TemplatePart.fromJson(Map<String, dynamic>.from(item)));
+          } catch (_) {}
+        }
+      }
+    }
+    return Template(
+      id: _jsonInt(json['id'], fallbackId),
+      title: (json['title'] ?? 'Untitled').toString(),
+      trackId: (json['track'] ?? json['trackId'] ?? 'uncat').toString(),
+      durationMinutes: math.max(
+        1,
+        _jsonInt(json['durationMinutes'] ?? json['minutes'], 60),
+      ),
+      kind: BlockKindJson.parse(json['type'] ?? json['kind']),
+      alarm: json['alarm'] == true,
+      repeat: RecurrenceJson.parse(json['repeat']),
+      parts: parts,
+    );
+  }
 }
 
 /// A block clipped to the timeline range. Blocks crossing midnight remain a
@@ -566,14 +645,27 @@ TimelineLayout buildTimelineLayout({
     });
     final List<DateTime> laneEnds = <DateTime>[];
     for (final TimelineSegment segment in group) {
-      int lane = 0;
-      while (lane < laneEnds.length && laneEnds[lane].isAfter(segment.start)) {
-        lane++;
-      }
-      if (lane == laneEnds.length) {
-        laneEnds.add(segment.end);
+      final int? explicitLane = segment.block.lane;
+      int lane;
+      if (explicitLane != null) {
+        lane = math.max(0, explicitLane);
+        while (laneEnds.length <= lane) {
+          laneEnds.add(segment.start);
+        }
+        if (laneEnds[lane].isBefore(segment.end)) {
+          laneEnds[lane] = segment.end;
+        }
       } else {
-        laneEnds[lane] = segment.end;
+        lane = 0;
+        while (lane < laneEnds.length &&
+            laneEnds[lane].isAfter(segment.start)) {
+          lane++;
+        }
+        if (lane == laneEnds.length) {
+          laneEnds.add(segment.end);
+        } else {
+          laneEnds[lane] = segment.end;
+        }
       }
       segment.lane = lane;
     }
