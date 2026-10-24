@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'models.dart';
 import 'sheets.dart';
@@ -26,11 +27,14 @@ class TimelinePageState extends State<TimelinePage> {
   late DateTime _viewStart;
   double _hours = 24;
   bool _didInitView = false;
-  int? _selectedId;
+  final Set<int> _selectedIds = <int>{};
+  bool _selecting = false;
   Timer? _clock;
   final ScrollController _vertical = ScrollController();
 
   TimelineStore get store => widget.store;
+  int? get _primarySelectedId =>
+      _selectedIds.length == 1 ? _selectedIds.single : null;
 
   @override
   void initState() {
@@ -38,6 +42,7 @@ class TimelinePageState extends State<TimelinePage> {
     _now = DateTime.now();
     _viewStart = _now;
     store.addListener(_onStoreChanged);
+    HardwareKeyboard.instance.addHandler(_handleKey);
     _clock = Timer.periodic(const Duration(seconds: 20), (_) {
       if (!mounted) return;
       setState(() => _now = DateTime.now());
@@ -46,6 +51,7 @@ class TimelinePageState extends State<TimelinePage> {
 
   @override
   void dispose() {
+    HardwareKeyboard.instance.removeHandler(_handleKey);
     store.removeListener(_onStoreChanged);
     _clock?.cancel();
     _vertical.dispose();
@@ -54,15 +60,82 @@ class TimelinePageState extends State<TimelinePage> {
 
   void _onStoreChanged() {
     if (!mounted) return;
-    if (_selectedId != null && store.blockById(_selectedId!) == null) {
-      _selectedId = null;
-    }
+    _selectedIds.removeWhere((int id) => store.blockById(id) == null);
+    if (_selectedIds.isEmpty) _selecting = false;
     setState(() {});
+  }
+
+  bool _handleKey(KeyEvent event) {
+    if (event is! KeyDownEvent) return false;
+    final BuildContext? focusContext =
+        FocusManager.instance.primaryFocus?.context;
+    final bool editingText =
+        focusContext != null &&
+        (focusContext.widget is EditableText ||
+            focusContext.findAncestorWidgetOfExactType<EditableText>() !=
+                null ||
+            focusContext.findAncestorStateOfType<EditableTextState>() != null);
+    if (editingText) return false;
+    if (event.logicalKey == LogicalKeyboardKey.escape &&
+        _selectedIds.isNotEmpty) {
+      _clearSelection();
+      return true;
+    }
+    if (!HardwareKeyboard.instance.isControlPressed ||
+        event.logicalKey != LogicalKeyboardKey.keyZ) {
+      return false;
+    }
+    unawaited(_undo());
+    return true;
   }
 
   void selectBlock(int id) {
     if (store.blockById(id) == null) return;
-    setState(() => _selectedId = id);
+    setState(() {
+      _selectedIds
+        ..clear()
+        ..add(id);
+      _selecting = false;
+    });
+  }
+
+  void _selectBlock(int id, {required bool toggle}) {
+    if (store.blockById(id) == null) return;
+    setState(() {
+      if (toggle) {
+        if (!_selectedIds.add(id)) _selectedIds.remove(id);
+      } else {
+        _selectedIds
+          ..clear()
+          ..add(id);
+      }
+      if (_selectedIds.isEmpty) _selecting = false;
+    });
+  }
+
+  void _clearSelection() {
+    if (_selectedIds.isEmpty && !_selecting) return;
+    setState(() {
+      _selectedIds.clear();
+      _selecting = false;
+    });
+  }
+
+  void _marqueeSelect(Set<int> ids, {required bool additive}) {
+    setState(() {
+      if (!additive) _selectedIds.clear();
+      _selectedIds.addAll(ids);
+      _selecting = _selectedIds.length > 1;
+    });
+  }
+
+  void _longPressSelect(int id) {
+    if (store.blockById(id) == null) return;
+    setState(() {
+      _selectedIds.add(id);
+      _selecting = true;
+    });
+    unawaited(HapticFeedback.selectionClick());
   }
 
   void _initViewport(double width) {
@@ -119,7 +192,8 @@ class TimelinePageState extends State<TimelinePage> {
       Duration(milliseconds: (span * .3).round()),
     );
     setState(() {
-      _selectedId = null;
+      _selectedIds.clear();
+      _selecting = false;
       _viewStart = _clampViewStart(start, _hours);
     });
   }
@@ -159,7 +233,12 @@ class TimelinePageState extends State<TimelinePage> {
       isNew: true,
     );
     if (!mounted || saved == null) return;
-    setState(() => _selectedId = saved.id);
+    setState(() {
+      _selectedIds
+        ..clear()
+        ..add(saved.id);
+      _selecting = false;
+    });
     _ensureVisible(saved);
     await showAppToast(
       context,
@@ -180,7 +259,12 @@ class TimelinePageState extends State<TimelinePage> {
       isNew: false,
     );
     if (!mounted || saved == null) return;
-    setState(() => _selectedId = saved.id);
+    setState(() {
+      _selectedIds
+        ..clear()
+        ..add(saved.id);
+      _selecting = false;
+    });
     _ensureVisible(saved);
   }
 
@@ -224,10 +308,114 @@ class TimelinePageState extends State<TimelinePage> {
   }
 
   void _openEditSelected() {
-    final int? id = _selectedId;
-    if (id == null) return;
-    final Block? block = store.blockById(id);
-    if (block != null) _editBlock(block);
+    final int? id = _primarySelectedId;
+    if (id != null) {
+      final Block? block = store.blockById(id);
+      if (block != null) {
+        _editBlock(block);
+        return;
+      }
+    }
+    if (_selectedIds.length > 1) {
+      _editSelection();
+    }
+  }
+
+  Future<void> _editSelection() async {
+    if (store.locked) {
+      await showAppToast(context, 'Layout is locked — unlock to edit blocks');
+      return;
+    }
+    final List<Block> selected = store.blocks
+        .where((Block block) => _selectedIds.contains(block.id))
+        .toList(growable: false);
+    if (selected.isEmpty) return;
+    final bool changed = await showBatchEditor(context, store, selected);
+    if (!mounted) return;
+    _onStoreChanged();
+    if (changed) {
+      await showAppToast(
+        context,
+        'Updated ${selected.length} ${selected.length == 1 ? 'block' : 'blocks'}',
+      );
+    }
+  }
+
+  Future<void> _deleteSelection() async {
+    final List<Block> selected = store.blocks
+        .where((Block block) => _selectedIds.contains(block.id))
+        .toList(growable: false);
+    if (selected.isEmpty) return;
+    final bool hasRepeat = selected.any((Block block) => block.repeats);
+    bool wholeSeries = false;
+    if (hasRepeat) {
+      final String? result = await showDialog<String>(
+        context: context,
+        builder: (BuildContext context) => AlertDialog(
+          title: Text(
+            'Delete ${selected.length} blocks?',
+            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+          ),
+          content: const Text(
+            'Some selected blocks repeat. Delete only the selected occurrences, '
+            'or remove every occurrence in their series.',
+            style: TextStyle(
+              fontSize: 12,
+              height: 1.45,
+              color: AppColors.muted,
+            ),
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(context).pop('cancel'),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop('one'),
+              child: const Text('Selected only'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop('series'),
+              style: TextButton.styleFrom(foregroundColor: AppColors.danger),
+              child: const Text('Whole series'),
+            ),
+          ],
+        ),
+      );
+      if (result == null || result == 'cancel') return;
+      wholeSeries = result == 'series';
+    } else {
+      final bool yes = await showConfirm(
+        context,
+        title: 'Delete ${selected.length} blocks?',
+        message:
+            '${selected.length} selected ${selected.length == 1 ? 'block' : 'blocks'} will be removed from the timeline.',
+      );
+      if (!yes) return;
+    }
+    final int count = selected.length;
+    store.deleteBlocks(_selectedIds, wholeSeries: wholeSeries);
+    _clearSelection();
+    if (mounted) {
+      await showAppToast(
+        context,
+        'Deleted $count ${count == 1 ? 'block' : 'blocks'}',
+      );
+    }
+  }
+
+  Future<void> _saveSelectionAsTemplate() async {
+    final List<Block> selected = store.blocks
+        .where((Block block) => _selectedIds.contains(block.id))
+        .toList(growable: false);
+    if (selected.isEmpty) return;
+    store.addTemplateFromBlocks(selected);
+    if (mounted) {
+      await showAppToast(
+        context,
+        'Saved ${selected.length} ${selected.length == 1 ? 'block' : 'blocks'} as a template',
+      );
+    }
   }
 
   @override
@@ -256,12 +444,14 @@ class TimelinePageState extends State<TimelinePage> {
   }
 
   Widget _buildHeader(BuildContext context) {
-    final Block? selected = _selectedId == null
+    final Block? selected = _primarySelectedId == null
         ? null
-        : store.blockById(_selectedId!);
+        : store.blockById(_primarySelectedId!);
     final Track? track = selected == null
         ? null
         : store.trackOrUncategorized(selected.trackId);
+    final bool multi = _selectedIds.length > 1;
+    final bool selectingOne = _selecting && selected != null && !multi;
     final bool windows = Platform.isWindows;
     return Container(
       height: windows ? 58 : 56,
@@ -273,28 +463,51 @@ class TimelinePageState extends State<TimelinePage> {
       child: Row(
         children: <Widget>[
           Expanded(
-            child: selected == null
+            child: multi
+                ? _multiHeader(_selectedIds.length)
+                : selected == null
                 ? _fallbackHeader()
+                : selectingOne
+                ? _selectingOneHeader(selected, track!)
                 : _selectedHeader(selected, track!),
           ),
           const SizedBox(width: 8),
           Row(
             mainAxisSize: MainAxisSize.min,
             children: <Widget>[
-              if (selected != null) ...<Widget>[
+              if (_selectedIds.isNotEmpty) ...<Widget>[
                 AppIconButton(
                   icon: Icons.edit_outlined,
                   tooltip: store.locked
                       ? 'Layout is locked'
+                      : multi
+                      ? 'Edit selected blocks'
                       : 'Edit exact times',
                   onPressed: _openEditSelected,
                   size: 32,
                 ),
                 const SizedBox(width: 5),
+                if (multi) ...<Widget>[
+                  AppIconButton(
+                    icon: Icons.bookmark_add_outlined,
+                    tooltip: 'Save selection as template',
+                    onPressed: _saveSelectionAsTemplate,
+                    size: 32,
+                  ),
+                  const SizedBox(width: 5),
+                  AppIconButton(
+                    icon: Icons.close,
+                    tooltip: 'Delete selected blocks',
+                    foreground: AppColors.danger,
+                    onPressed: _deleteSelection,
+                    size: 32,
+                  ),
+                  const SizedBox(width: 5),
+                ],
               ],
               AppIconButton(
                 icon: Icons.undo,
-                tooltip: 'Undo',
+                tooltip: 'Undo (Ctrl+Z)',
                 onPressed: store.hasUndo ? _undo : null,
                 size: 32,
               ),
@@ -314,6 +527,99 @@ class TimelinePageState extends State<TimelinePage> {
           ),
         ],
       ),
+    );
+  }
+
+  Widget _multiHeader(int count) {
+    return Row(
+      children: <Widget>[
+        Container(
+          width: 3,
+          height: 32,
+          decoration: BoxDecoration(
+            color: AppColors.accent,
+            borderRadius: BorderRadius.circular(2),
+          ),
+        ),
+        const SizedBox(width: 9),
+        Expanded(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Text(
+                '$count blocks selected',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: .1,
+                  color: AppColors.text,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                Platform.isAndroid
+                    ? 'Tap blocks to add or remove · tap empty space to clear'
+                    : 'Ctrl+click to add · Shift+drag to box select · Esc clears',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 10.5, color: AppColors.muted),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _selectingOneHeader(Block block, Track track) {
+    return Row(
+      children: <Widget>[
+        Container(
+          width: 3,
+          height: 32,
+          decoration: BoxDecoration(
+            color: track.color,
+            borderRadius: BorderRadius.circular(2),
+          ),
+        ),
+        const SizedBox(width: 9),
+        Expanded(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Row(
+                children: <Widget>[
+                  Flexible(
+                    child: Text(
+                      block.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                        color: AppColors.text,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  const _HeaderTag('SELECTING'),
+                ],
+              ),
+              const SizedBox(height: 2),
+              const Text(
+                'Tap more blocks to add them · tap empty space to clear',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 10.5, color: AppColors.muted),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 
@@ -527,19 +833,16 @@ class TimelinePageState extends State<TimelinePage> {
                             layout: layout,
                             contentHeight: contentHeight,
                             store: store,
-                            selectedId: _selectedId,
+                            selectedIds: _selectedIds,
+                            primarySelectedId: _primarySelectedId,
+                            selectionMode: _selecting,
                             now: _now,
                             showNames: store.showNames,
                             scrollController: _vertical,
-                            onSelect: (int? id) {
-                              if (id == null) {
-                                if (_selectedId != null) {
-                                  setState(() => _selectedId = null);
-                                }
-                              } else {
-                                selectBlock(id);
-                              }
-                            },
+                            onSelect: _selectBlock,
+                            onClearSelection: _clearSelection,
+                            onMarqueeSelect: _marqueeSelect,
+                            onLongPressSelect: _longPressSelect,
                             onEdit: _editBlock,
                             onViewport: _setViewport,
                             onToast: (String message) {
@@ -675,7 +978,7 @@ class TimelinePageState extends State<TimelinePage> {
             viewStart: _viewStart,
             hours: _hours,
             now: _now,
-            selectedId: _selectedId,
+            selectedIds: _selectedIds,
           ),
         ),
       ),

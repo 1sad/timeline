@@ -412,7 +412,7 @@ class MinimapPainter extends CustomPainter {
     required this.viewStart,
     required this.hours,
     required this.now,
-    required this.selectedId,
+    required this.selectedIds,
   });
 
   final List<Track> tracks;
@@ -422,7 +422,7 @@ class MinimapPainter extends CustomPainter {
   final DateTime viewStart;
   final double hours;
   final DateTime now;
-  final int? selectedId;
+  final Set<int> selectedIds;
 
   double _xOf(DateTime value, double width) {
     final int range = math.max(
@@ -494,7 +494,7 @@ class MinimapPainter extends CustomPainter {
           ),
           Paint()..color = AppColors.alpha(color, block.isZone ? .45 : .86),
         );
-        if (block.id == selectedId) {
+        if (selectedIds.contains(block.id)) {
           canvas.drawLine(
             Offset(left, y + (rowHeight - barHeight) / 2),
             Offset(left + width, y + (rowHeight - barHeight) / 2),

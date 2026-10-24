@@ -33,6 +33,7 @@ class UndoState {
     required this.trackOpen,
     required this.showNames,
     required this.locked,
+    required this.uncategorizedSlot,
   });
 
   final List<Track> tracks;
@@ -41,6 +42,7 @@ class UndoState {
   final Map<String, bool> trackOpen;
   final bool showNames;
   final bool locked;
+  final int uncategorizedSlot;
 }
 
 class UndoEntry {
@@ -78,14 +80,36 @@ class TimelineStore extends ChangeNotifier {
   bool showNames = true;
   bool locked = false;
 
+  /// Insertion position of the built-in Uncategorized category among the
+  /// editable categories. -1 keeps it after the last category.
+  int _uncategorizedSlot = -1;
+
   int _nextBlockId = 1;
   int _nextTrackId = 1;
   int _nextTemplateId = 1;
   Timer? _saveTimer;
   TimelineStorage? _storage;
 
+  Map<int, _MoveOriginals>? _groupMoveOriginals;
+  Map<int, int>? _groupMoveLanes;
+  bool _groupMoveVertical = false;
+
   bool get hasUndo => undoStack.isNotEmpty;
   int get maxUndo => 30;
+
+  /// Categories in display order, including Uncategorized even when it is
+  /// currently empty. This lets the Categories sheet move it at any time.
+  List<Track> get displayTracks {
+    if (tracks.any((Track track) => track.id == _uncatId)) {
+      return List<Track>.of(tracks);
+    }
+    final List<Track> result = List<Track>.of(tracks);
+    final int slot = _uncategorizedSlot < 0
+        ? result.length
+        : _uncategorizedSlot.clamp(0, result.length);
+    result.insert(slot, uncategorized);
+    return result;
+  }
 
   Track? trackById(String id) {
     for (final Track track in tracks) {
@@ -256,6 +280,9 @@ class TimelineStore extends ChangeNotifier {
     for (final Track track in tracks) {
       trackOpen.putIfAbsent(track.id, () => true);
     }
+    _uncategorizedSlot = map['uncategorizedSlot'] is num
+        ? (map['uncategorizedSlot'] as num).toInt()
+        : -1;
     _ensureUncategorized();
     return true;
   }
@@ -280,14 +307,23 @@ class TimelineStore extends ChangeNotifier {
         needsUncat || blocks.any((Block block) => block.trackId == _uncatId);
     if (needsUncat) {
       if (!known.contains(_uncatId)) {
-        tracks.add(uncategorized);
+        final int slot = _uncategorizedSlot < 0
+            ? tracks.length
+            : _uncategorizedSlot.clamp(0, tracks.length);
+        tracks.insert(slot, uncategorized);
         trackOpen[_uncatId] = true;
       }
       for (final Block block in blocks) {
         if (!known.contains(block.trackId)) block.trackId = _uncatId;
       }
     } else {
-      tracks.removeWhere((Track track) => track.id == _uncatId);
+      final int index = tracks.indexWhere(
+        (Track track) => track.id == _uncatId,
+      );
+      if (index >= 0) {
+        _uncategorizedSlot = index;
+        tracks.removeAt(index);
+      }
       trackOpen.remove(_uncatId);
     }
     for (final Block block in blocks) {
@@ -295,7 +331,10 @@ class TimelineStore extends ChangeNotifier {
           !tracks.any((Track t) => t.id == _uncatId)) {
         // This can only happen if a caller changed the block list directly.
         // Keeping the invariant in one place avoids an invisible block.
-        tracks.add(uncategorized);
+        final int slot = _uncategorizedSlot < 0
+            ? tracks.length
+            : _uncategorizedSlot.clamp(0, tracks.length);
+        tracks.insert(slot, uncategorized);
         trackOpen[_uncatId] = true;
       }
     }
@@ -319,12 +358,14 @@ class TimelineStore extends ChangeNotifier {
             kind: template.kind,
             alarm: template.alarm,
             repeat: template.repeat,
+            parts: List<TemplatePart>.of(template.parts),
           ),
         )
         .toList(),
     trackOpen: Map<String, bool>.from(trackOpen),
     showNames: showNames,
     locked: locked,
+    uncategorizedSlot: _uncategorizedSlot,
   );
 
   void recordUndoState(UndoState state, String label) {
@@ -362,6 +403,7 @@ class TimelineStore extends ChangeNotifier {
             kind: template.kind,
             alarm: template.alarm,
             repeat: template.repeat,
+            parts: List<TemplatePart>.of(template.parts),
           ),
         ),
       );
@@ -370,6 +412,7 @@ class TimelineStore extends ChangeNotifier {
       ..addAll(state.trackOpen);
     showNames = state.showNames;
     locked = state.locked;
+    _uncategorizedSlot = state.uncategorizedSlot;
     _nextBlockId = _maxBlockId() + 1;
     _nextTrackId = _nextAvailableTrackNumber();
     _nextTemplateId = _maxTemplateId() + 1;
@@ -426,11 +469,60 @@ class TimelineStore extends ChangeNotifier {
       name: name?.trim().isNotEmpty == true ? name!.trim() : 'New category',
       colorValue: colorValue ?? _palette[(index - 1) % _palette.length],
     );
-    tracks.add(track);
+    final int uncatIndex = tracks.indexWhere(
+      (Track item) => item.id == _uncatId,
+    );
+    if (uncatIndex == tracks.length - 1) {
+      tracks.insert(uncatIndex, track);
+    } else {
+      if (_uncategorizedSlot >= 0 && _uncategorizedSlot >= tracks.length) {
+        _uncategorizedSlot++;
+      }
+      tracks.add(track);
+    }
     trackOpen[track.id] = true;
     notifyListeners();
     _scheduleSave();
     return track;
+  }
+
+  void reorderCategory(String trackId, int targetIndex) {
+    final List<Track> display = displayTracks;
+    final int oldIndex = display.indexWhere(
+      (Track track) => track.id == trackId,
+    );
+    if (oldIndex < 0) return;
+    final int target = targetIndex.clamp(0, display.length - 1);
+    if (oldIndex == target) return;
+    _pushUndo('Reordered categories');
+    final Track moved = display.removeAt(oldIndex);
+    display.insert(target, moved);
+    final int uncatIndex = display.indexWhere(
+      (Track track) => track.id == _uncatId,
+    );
+    _uncategorizedSlot = uncatIndex;
+    tracks
+      ..clear()
+      ..addAll(display.where((Track track) => track.id != _uncatId));
+    if (uncatIndex >= 0 && hasBlocksInTrack(_uncatId)) {
+      tracks.insert(uncatIndex, uncategorized);
+      trackOpen[_uncatId] = true;
+    }
+    _ensureUncategorized();
+    notifyListeners();
+    _scheduleSave();
+  }
+
+  void clearTrack(String trackId) {
+    final Track? track = trackById(trackId);
+    if (track == null) return;
+    final int count = blockCountForTrack(trackId);
+    if (count == 0) return;
+    _pushUndo('Cleared ${track.name}');
+    blocks.removeWhere((Block block) => block.trackId == trackId);
+    _ensureUncategorized();
+    notifyListeners();
+    _scheduleSave();
   }
 
   bool renameTrack(String trackId, String name) {
@@ -614,7 +706,123 @@ class TimelineStore extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Starts a rigid drag for one or more selected blocks. The optional lane
+  /// map is the layout's current lane for visible blocks; it lets the store
+  /// resolve collisions against blocks that have not been assigned an explicit
+  /// lane yet.
+  void beginGroupMove(
+    Set<int> selectedIds, {
+    Map<int, int> lanes = const <int, int>{},
+    bool allowVertical = false,
+  }) {
+    final List<Block> selected = blocks
+        .where((Block block) => selectedIds.contains(block.id))
+        .toList(growable: false);
+    if (selected.isEmpty) return;
+    final Set<int> seriesIds = selected
+        .map((Block block) => block.seriesId)
+        .whereType<int>()
+        .toSet();
+    final Map<int, _MoveOriginals> originals = <int, _MoveOriginals>{};
+    for (final Block block in blocks) {
+      final bool inGroup =
+          selectedIds.contains(block.id) ||
+          (block.seriesId != null && seriesIds.contains(block.seriesId));
+      if (!inGroup) continue;
+      int lane = lanes[block.id] ?? block.lane ?? 0;
+      if (!selectedIds.contains(block.id) && block.seriesId != null) {
+        final Block? anchor = selected
+            .where((Block item) => item.seriesId == block.seriesId)
+            .firstOrNull;
+        if (anchor != null) {
+          lane = lanes[anchor.id] ?? anchor.lane ?? lane;
+        }
+      }
+      originals[block.id] = _MoveOriginals(
+        start: block.start,
+        end: block.end,
+        lane: math.max(0, lane),
+        explicitLane: block.lane,
+      );
+    }
+    _groupMoveOriginals = originals;
+    _groupMoveLanes = Map<int, int>.from(lanes);
+    _groupMoveVertical = allowVertical;
+  }
+
+  void updateGroupMove({required int deltaMs, required int laneDelta}) {
+    final Map<int, _MoveOriginals>? originals = _groupMoveOriginals;
+    if (originals == null || originals.isEmpty) return;
+    final Set<int> affectedIds = originals.keys.toSet();
+    final List<Block> affected = blocks
+        .where((Block block) => affectedIds.contains(block.id))
+        .toList(growable: false);
+    if (affected.isEmpty) return;
+
+    final Map<int, DateTime> starts = <int, DateTime>{};
+    final Map<int, DateTime> ends = <int, DateTime>{};
+    final Map<int, int> requested = <int, int>{};
+    for (final Block block in affected) {
+      final _MoveOriginals origin = originals[block.id]!;
+      starts[block.id] = origin.start.add(Duration(milliseconds: deltaMs));
+      ends[block.id] = origin.end.add(Duration(milliseconds: deltaMs));
+      requested[block.id] = math.max(0, origin.lane + laneDelta);
+    }
+
+    int shift = 0;
+    if (_groupMoveVertical) {
+      final List<Block> fixed = blocks
+          .where((Block block) => !affectedIds.contains(block.id))
+          .toList(growable: false);
+      bool collides(int extra) {
+        for (final Block block in affected) {
+          final int lane = requested[block.id]! + extra;
+          final DateTime start = starts[block.id]!;
+          final DateTime end = ends[block.id]!;
+          for (final Block other in fixed) {
+            if (other.trackId != block.trackId ||
+                other.isZone != block.isZone) {
+              continue;
+            }
+            final int otherLane = _groupMoveLanes?[other.id] ?? other.lane ?? 0;
+            if (otherLane != lane) continue;
+            if (other.end.isAfter(start) && other.start.isBefore(end)) {
+              return true;
+            }
+          }
+        }
+        return false;
+      }
+
+      while (shift < 200 && collides(shift)) {
+        shift++;
+      }
+    }
+
+    for (final Block block in affected) {
+      final _MoveOriginals origin = originals[block.id]!;
+      block.start = starts[block.id]!;
+      block.end = ends[block.id]!;
+      if (_groupMoveVertical) {
+        block.lane = requested[block.id]! + shift;
+      } else if (origin.explicitLane != null) {
+        block.lane = origin.explicitLane;
+      }
+    }
+    notifyListeners();
+  }
+
+  int groupLaneShiftFor(int blockId, int targetLane) {
+    final Map<int, _MoveOriginals>? originals = _groupMoveOriginals;
+    if (originals == null || !originals.containsKey(blockId)) return 0;
+    final int current = originals[blockId]!.lane;
+    return targetLane - current;
+  }
+
   void finishLiveChange() {
+    _groupMoveOriginals = null;
+    _groupMoveLanes = null;
+    _groupMoveVertical = false;
     notifyListeners();
     _scheduleSave();
   }
@@ -633,16 +841,139 @@ class TimelineStore extends ChangeNotifier {
     _scheduleSave();
   }
 
+  void deleteBlocks(Set<int> ids, {bool wholeSeries = false}) {
+    if (ids.isEmpty) return;
+    final List<Block> selected = blocks
+        .where((Block block) => ids.contains(block.id))
+        .toList(growable: false);
+    if (selected.isEmpty) return;
+    final Set<int> seriesIds = wholeSeries
+        ? selected.map((Block block) => block.seriesId).whereType<int>().toSet()
+        : <int>{};
+    _pushUndo(
+      selected.length == 1
+          ? 'Deleted ${selected.first.title}'
+          : 'Deleted ${selected.length} blocks',
+    );
+    blocks.removeWhere(
+      (Block block) =>
+          ids.contains(block.id) ||
+          (block.seriesId != null && seriesIds.contains(block.seriesId)),
+    );
+    _ensureUncategorized();
+    notifyListeners();
+    _scheduleSave();
+  }
+
+  void batchEditBlocks(
+    Set<int> ids, {
+    String? trackId,
+    String? title,
+    BlockKind? kind,
+    bool? alarm,
+    Recurrence? repeat,
+    int durationDeltaMinutes = 0,
+  }) {
+    if (ids.isEmpty) return;
+    final List<Block> selected = blocks
+        .where((Block block) => ids.contains(block.id))
+        .toList(growable: false);
+    if (selected.isEmpty) return;
+    _pushUndo(
+      selected.length == 1
+          ? 'Edited ${selected.first.title}'
+          : 'Edited ${selected.length} blocks',
+    );
+
+    final Map<int, List<Block>> groups = <int, List<Block>>{};
+    for (final Block block in selected) {
+      final int key = block.seriesId ?? block.id;
+      groups.putIfAbsent(key, () => <Block>[]).add(block);
+    }
+    for (final MapEntry<int, List<Block>> entry in groups.entries) {
+      final List<Block> group = entry.value
+        ..sort((Block a, Block b) => a.start.compareTo(b.start));
+      final Block base = group.first;
+      final int? seriesId = base.seriesId;
+      final List<Block> affected = seriesId == null
+          ? <Block>[base]
+          : blocks
+                .where((Block block) => block.seriesId == seriesId)
+                .toList(growable: false);
+      final int primaryId = base.id;
+      final Duration duration = base.duration;
+      int minutes = duration.inMinutes + durationDeltaMinutes;
+      if (minutes < 5) minutes = 5;
+      final String? nextTitle = title?.trim();
+      final Block draft = base.copyWith(
+        id: primaryId,
+        trackId: trackId ?? base.trackId,
+        title: nextTitle == null || nextTitle.isEmpty ? null : nextTitle,
+        kind: kind ?? base.kind,
+        alarm: alarm ?? base.alarm,
+        repeat: repeat ?? base.repeat,
+        end: base.start.add(Duration(minutes: minutes)),
+        seriesId: seriesId,
+        clearSeriesId: repeat == Recurrence.none || seriesId == null,
+        lane: trackId != null || kind != null ? null : base.lane,
+        clearLane: trackId != null || kind != null,
+      );
+      blocks.removeWhere((Block block) => affected.contains(block));
+      if (draft.repeat == Recurrence.none) {
+        blocks.add(draft.copyWith(seriesId: null, clearSeriesId: true));
+      } else {
+        final int newSeriesId = seriesId ?? primaryId;
+        final List<Block> generated = _expandRecurringBlock(
+          draft.copyWith(seriesId: newSeriesId),
+          newSeriesId,
+        );
+        blocks.addAll(generated);
+      }
+    }
+    _sortBlocks();
+    _ensureUncategorized();
+    notifyListeners();
+    _scheduleSave();
+  }
+
   void addTemplateFromBlock(Block block) {
-    final int duration = math.max(1, block.duration.inMinutes);
+    addTemplateFromBlocks(<Block>[block]);
+  }
+
+  void addTemplateFromBlocks(Iterable<Block> selection) {
+    final List<Block> chosen = selection.toList(growable: false);
+    if (chosen.isEmpty) return;
+    chosen.sort((Block a, Block b) => a.start.compareTo(b.start));
+    final DateTime anchor = chosen.first.start;
+    final int span = chosen
+        .map((Block block) => block.end.difference(anchor).inMinutes)
+        .reduce(math.max);
+    final List<TemplatePart> parts = <TemplatePart>[
+      for (final Block block in chosen)
+        TemplatePart(
+          title: block.title.trim().isEmpty ? 'Untitled' : block.title.trim(),
+          trackId: block.trackId,
+          offsetMinutes: block.start.difference(anchor).inMinutes,
+          durationMinutes: math.max(1, block.duration.inMinutes),
+          kind: block.kind,
+          alarm: block.alarm,
+          repeat: block.repeat,
+        ),
+    ];
+    final Block first = chosen.first;
     final Template template = Template(
       id: _nextTemplateId++,
-      title: block.title.trim().isEmpty ? 'Untitled' : block.title.trim(),
-      trackId: block.trackId,
-      durationMinutes: duration,
-      kind: block.kind,
-      alarm: block.alarm,
-      repeat: block.repeat,
+      title: chosen.length == 1
+          ? (first.title.trim().isEmpty ? 'Untitled' : first.title.trim())
+          : '${chosen.length}-block selection',
+      trackId: first.trackId,
+      durationMinutes: chosen.length == 1
+          ? math.max(1, first.duration.inMinutes)
+          : math.max(1, span),
+      kind: first.kind,
+      alarm: first.alarm,
+      repeat: first.repeat,
+      parts: parts,
     );
     templates.add(template);
     notifyListeners();
@@ -665,10 +996,66 @@ class TimelineStore extends ChangeNotifier {
         kind: template.kind,
         alarm: template.alarm,
         repeat: template.repeat,
+        parts: List<TemplatePart>.of(template.parts),
       ),
     );
     notifyListeners();
     _scheduleSave();
+  }
+
+  List<Block> addBlocksFromTemplate(Template template, DateTime start) {
+    final List<TemplatePart> parts = template.parts.isEmpty
+        ? <TemplatePart>[
+            TemplatePart(
+              title: template.title,
+              trackId: template.trackId,
+              offsetMinutes: 0,
+              durationMinutes: template.durationMinutes,
+              kind: template.kind,
+              alarm: template.alarm,
+              repeat: template.repeat,
+            ),
+          ]
+        : template.parts;
+    if (parts.isEmpty) return const <Block>[];
+    _pushUndo('Added ${template.title}');
+    final List<Block> added = <Block>[];
+    for (final TemplatePart part in parts) {
+      final DateTime partStart = start.add(
+        Duration(minutes: math.max(0, part.offsetMinutes)),
+      );
+      final DateTime partEnd = partStart.add(
+        Duration(minutes: math.max(1, part.durationMinutes)),
+      );
+      final int id = _nextBlockId++;
+      final Block draft = Block(
+        id: id,
+        trackId: part.trackId,
+        title: part.title,
+        start: partStart,
+        end: partEnd,
+        kind: part.kind,
+        alarm: part.alarm,
+        repeat: part.repeat,
+      );
+      if (part.repeat == Recurrence.none) {
+        blocks.add(draft);
+        added.add(draft);
+      } else {
+        final int seriesId = id;
+        final List<Block> generated = _expandRecurringBlock(
+          draft.copyWith(seriesId: seriesId),
+          seriesId,
+        );
+        blocks.addAll(generated);
+        added.addAll(generated);
+      }
+    }
+    _sortBlocks();
+    _ensureUncategorized();
+    notifyListeners();
+    _scheduleSave();
+    return added;
   }
 
   Map<String, dynamic> toJsonMap() => <String, dynamic>{
@@ -683,6 +1070,7 @@ class TimelineStore extends ChangeNotifier {
     'trackOpen': Map<String, bool>.from(trackOpen),
     'namesHidden': !showNames,
     'locked': locked,
+    'uncategorizedSlot': _uncategorizedSlot,
   };
 
   String exportJsonString({bool pretty = true}) {
@@ -790,6 +1178,9 @@ class TimelineStore extends ChangeNotifier {
     }
     if (map.containsKey('namesHidden')) showNames = map['namesHidden'] != true;
     if (map.containsKey('locked')) locked = map['locked'] == true;
+    _uncategorizedSlot = map['uncategorizedSlot'] is num
+        ? (map['uncategorizedSlot'] as num).toInt()
+        : -1;
     _ensureUncategorized();
     undoStack.add(UndoEntry(state: before, label: 'Imported sync file'));
     if (undoStack.length > maxUndo) undoStack.removeAt(0);
@@ -813,6 +1204,7 @@ class TimelineStore extends ChangeNotifier {
         'trackOpen': Map<String, bool>.from(trackOpen),
         'namesHidden': !showNames,
         'locked': locked,
+        'uncategorizedSlot': _uncategorizedSlot,
       }),
     );
   }
@@ -845,6 +1237,8 @@ class TimelineStore extends ChangeNotifier {
     }
     _nextBlockId = 1;
     _nextTrackId = 1;
+    _nextTemplateId = 1;
+    _uncategorizedSlot = -1;
 
     final DateTime now = DateTime.now();
     final DateTime today = startOfLocalDay(now);
@@ -996,6 +1390,20 @@ class TimelineStore extends ChangeNotifier {
     _saveTimer = null;
     super.dispose();
   }
+}
+
+class _MoveOriginals {
+  const _MoveOriginals({
+    required this.start,
+    required this.end,
+    required this.lane,
+    required this.explicitLane,
+  });
+
+  final DateTime start;
+  final DateTime end;
+  final int lane;
+  final int? explicitLane;
 }
 
 class _Rng {

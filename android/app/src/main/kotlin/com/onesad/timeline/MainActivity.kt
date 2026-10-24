@@ -1,4 +1,4 @@
-package com.j10n3.timeline
+﻿package com.onesad.timeline
 
 import io.flutter.embedding.android.FlutterActivity
 
