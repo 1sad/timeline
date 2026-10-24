@@ -54,7 +54,7 @@ On Android, data stays in the app's private storage. Use the in-app JSON export 
 
 ## Development
 
-Built with Flutter. Developed with assistance from OpenCode using DeepSeek V4.1 Flash Free.
+Built with Flutter. Developed with assistance from OpenCode using DeepSeek V4.1 Flash.
 
 ## License
 
