@@ -23,7 +23,7 @@ class NotificationService {
         android: AndroidInitializationSettings('@mipmap/ic_launcher'),
         windows: WindowsInitializationSettings(
           appName: 'Timeline',
-          appUserModelId: 'J10n3.Timeline',
+          appUserModelId: '1sad.Timeline',
           guid: '7d3e7a2c-9f6a-4c1e-9b4e-3f6b0a4a2c91',
         ),
       );

@@ -14,7 +14,7 @@ if (keystorePropertiesFile.exists()) {
 }
 
 android {
-    namespace = "com.j10n3.timeline"
+    namespace = "com.onesad.timeline"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
@@ -25,8 +25,7 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.j10n3.timeline"
+        applicationId = "com.onesad.timeline"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = 26
@@ -57,6 +56,17 @@ android {
             } else {
                 signingConfigs.getByName("debug")
             }
+            // shared_preferences_android uses Kotlin coroutine internals through
+            // JNI. R8 has repeatedly removed or renamed those classes in release
+            // builds, causing a black screen before the first Flutter frame.
+            // Keep shrinking off for now; the startup guard in main.dart also
+            // shows a readable error instead of a blank window if it regresses.
+            isMinifyEnabled = false
+            isShrinkResources = false
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
         }
     }
 }

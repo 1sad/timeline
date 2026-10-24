@@ -1,7 +1,8 @@
 import 'dart:convert';
-import 'dart:typed_data';
+import 'dart:math' as math;
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'models.dart';
@@ -16,6 +17,18 @@ Future<void> showCategoriesSheet(BuildContext context, TimelineStore store) {
   );
 }
 
+Future<bool> showBatchEditor(
+  BuildContext context,
+  TimelineStore store,
+  List<Block> blocks,
+) async {
+  final bool? changed = await showAppSheet<bool>(
+    context: context,
+    child: _BatchEditorSheet(store: store, blocks: blocks),
+  );
+  return changed ?? false;
+}
+
 class _CategoriesSheet extends StatefulWidget {
   const _CategoriesSheet({required this.store});
 
@@ -28,32 +41,47 @@ class _CategoriesSheet extends StatefulWidget {
 class _CategoriesSheetState extends State<_CategoriesSheet> {
   String? _paletteFor;
   String? _confirmDelete;
+  String? _confirmClear;
   bool _busy = false;
 
   TimelineStore get store => widget.store;
 
   void _close() => Navigator.of(context).pop();
 
+  Future<void> _undo() async {
+    final String? label = store.undo();
+    if (!mounted) return;
+    await showAppToast(
+      context,
+      label == null ? 'Nothing to undo' : 'Undid: $label',
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
       animation: store,
       builder: (BuildContext context, Widget? child) {
-        final List<Track> editable = store.tracks
+        final List<Track> ordered = store.displayTracks;
+        final int editableCount = ordered
             .where((Track track) => !track.fixed)
-            .toList();
-        final Track? uncat = store.trackById('uncat');
+            .length;
         return SheetFrame(
           kicker: 'Categories',
           title: 'Your tracks',
-          subtitle:
-              'Rename, recolour, add or delete. Zero categories is allowed.',
+          subtitle: 'Drag to reorder. Rename, recolour, add or delete. Zero categories is allowed.',
           onClose: _close,
+          headerTrailing: AppIconButton(
+            icon: Icons.undo,
+            tooltip: 'Undo',
+            onPressed: store.hasUndo ? _undo : null,
+            size: 30,
+          ),
           footer: Row(
             children: <Widget>[
               Expanded(
                 child: Text(
-                  '${store.tracks.length} ${store.tracks.length == 1 ? 'category' : 'categories'} · '
+                  '$editableCount ${editableCount == 1 ? 'category' : 'categories'} · '
                   '${store.blocks.length} ${store.blocks.length == 1 ? 'block' : 'blocks'}',
                   style: const TextStyle(fontSize: 10, color: AppColors.faint),
                 ),
@@ -71,50 +99,123 @@ class _CategoriesSheetState extends State<_CategoriesSheet> {
             children: <Widget>[
               const _SheetTip(
                 text:
-                    'Blocks keep their times if you delete a category. '
-                    'They move to Uncategorized instead.',
+                    'Drag the dotted handle to reorder. On Android, long-press the handle. '
+                    'Blocks keep their times if you delete a category.',
               ),
               const SizedBox(height: 12),
-              if (editable.isEmpty && uncat == null)
+              if (ordered.isEmpty)
                 const _EmptyCategories()
-              else ...<Widget>[
-                for (final Track track in editable)
-                  _CategoryRow(
-                    key: ValueKey<String>(track.id),
-                    store: store,
-                    track: track,
-                    count: store.blockCountForTrack(track.id),
-                    paletteOpen: _paletteFor == track.id,
-                    confirmOpen: _confirmDelete == track.id,
-                    onPalette: () => setState(() {
-                      _paletteFor = _paletteFor == track.id ? null : track.id;
-                      _confirmDelete = null;
-                    }),
-                    onAskDelete: () => setState(() {
+              else
+                ReorderableListView.builder(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  buildDefaultDragHandles: false,
+                  itemCount: ordered.length,
+                  proxyDecorator:
+                      (Widget child, int index, Animation<double> animation) {
+                        return AnimatedBuilder(
+                          animation: animation,
+                          builder: (BuildContext context, Widget? _) {
+                            final double lift = Curves.easeOut.transform(
+                              animation.value,
+                            );
+                            return Transform.translate(
+                              offset: Offset(0, -2 * lift),
+                              child: Transform.scale(
+                                scale: 1 + 0.008 * lift,
+                                child: Material(
+                                  color: Colors.transparent,
+                                  elevation: 12 * lift,
+                                  borderRadius: BorderRadius.circular(9),
+                                  child: Stack(
+                                    children: <Widget>[
+                                      child,
+                                      Positioned.fill(
+                                        bottom: 7,
+                                        child: IgnorePointer(
+                                          child: DecoratedBox(
+                                            decoration: BoxDecoration(
+                                              borderRadius:
+                                                  BorderRadius.circular(9),
+                                              border: Border.all(
+                                                color: AppColors.alpha(
+                                                  AppColors.accent,
+                                                  0.8 * lift,
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            );
+                          },
+                        );
+                      },
+                  onReorderItem: (int oldIndex, int newIndex) {
+                    if (store.locked) return;
+                    store.reorderCategory(ordered[oldIndex].id, newIndex);
+                    setState(() {
                       _paletteFor = null;
-                      _confirmDelete = _confirmDelete == track.id
-                          ? null
-                          : track.id;
-                    }),
-                    onDelete: () {
-                      store.deleteTrack(track.id);
-                      setState(() => _confirmDelete = null);
-                    },
-                  ),
-                if (uncat != null)
-                  _CategoryRow(
-                    key: const ValueKey<String>('uncat'),
-                    store: store,
-                    track: uncat,
-                    count: store.blockCountForTrack('uncat'),
-                    paletteOpen: false,
-                    confirmOpen: false,
-                    fixed: true,
-                    onPalette: () {},
-                    onAskDelete: () {},
-                    onDelete: () {},
-                  ),
-              ],
+                      _confirmDelete = null;
+                      _confirmClear = null;
+                    });
+                  },
+                  itemBuilder: (BuildContext context, int index) {
+                    final Track track = ordered[index];
+                    final bool fixed = track.fixed;
+                    return _CategoryRow(
+                      key: ValueKey<String>(track.id),
+                      store: store,
+                      track: track,
+                      count: store.blockCountForTrack(track.id),
+                      paletteOpen: _paletteFor == track.id,
+                      confirmOpen: _confirmDelete == track.id,
+                      clearOpen: _confirmClear == track.id,
+                      reorderIndex: index,
+                      reorderEnabled: !store.locked,
+                      onPalette: fixed
+                          ? () {}
+                          : () => setState(() {
+                              _paletteFor = _paletteFor == track.id
+                                  ? null
+                                  : track.id;
+                              _confirmDelete = null;
+                              _confirmClear = null;
+                            }),
+                      onAskDelete: fixed
+                          ? () {}
+                          : () => setState(() {
+                              _paletteFor = null;
+                              _confirmClear = null;
+                              _confirmDelete = _confirmDelete == track.id
+                                  ? null
+                                  : track.id;
+                            }),
+                      onDelete: fixed
+                          ? () {}
+                          : () {
+                              store.deleteTrack(track.id);
+                              setState(() => _confirmDelete = null);
+                            },
+                      onAskClear: () => setState(() {
+                        _paletteFor = null;
+                        _confirmDelete = null;
+                        _confirmClear = _confirmClear == track.id
+                            ? null
+                            : track.id;
+                      }),
+                      onClear: () {
+                        store.clearTrack(track.id);
+                        setState(() => _confirmClear = null);
+                      },
+                      fixed: fixed,
+                    );
+                  },
+                ),
               if (store.templates.isNotEmpty) ...<Widget>[
                 const SizedBox(height: 22),
                 const _SectionLabel('Templates'),
@@ -285,9 +386,14 @@ class _CategoryRow extends StatefulWidget {
     required this.count,
     required this.paletteOpen,
     required this.confirmOpen,
+    required this.clearOpen,
     required this.onPalette,
     required this.onAskDelete,
     required this.onDelete,
+    required this.onAskClear,
+    required this.onClear,
+    required this.reorderIndex,
+    required this.reorderEnabled,
     this.fixed = false,
   });
 
@@ -296,9 +402,14 @@ class _CategoryRow extends StatefulWidget {
   final int count;
   final bool paletteOpen;
   final bool confirmOpen;
+  final bool clearOpen;
   final VoidCallback onPalette;
   final VoidCallback onAskDelete;
   final VoidCallback onDelete;
+  final VoidCallback onAskClear;
+  final VoidCallback onClear;
+  final int reorderIndex;
+  final bool reorderEnabled;
   final bool fixed;
 
   @override
@@ -361,6 +472,32 @@ class _CategoryRowState extends State<_CategoryRow> {
             padding: const EdgeInsets.fromLTRB(8, 6, 6, 6),
             child: Row(
               children: <Widget>[
+                if (widget.reorderEnabled)
+                  defaultTargetPlatform == TargetPlatform.windows
+                      ? Tooltip(
+                          message: 'Drag to reorder',
+                          child: ReorderableDragStartListener(
+                            index: widget.reorderIndex,
+                            child: const _DragGrip(),
+                          ),
+                        )
+                      : Semantics(
+                          label: 'Long-press to reorder',
+                          child: ReorderableDelayedDragStartListener(
+                            index: widget.reorderIndex,
+                            child: const _DragGrip(),
+                          ),
+                        )
+                else
+                  const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 4),
+                    child: Icon(
+                      Icons.drag_handle,
+                      size: 16,
+                      color: AppColors.faint,
+                    ),
+                  ),
+                const SizedBox(width: 2),
                 Tooltip(
                   message: widget.fixed ? 'Built-in category' : 'Change colour',
                   child: InkWell(
@@ -418,7 +555,33 @@ class _CategoryRowState extends State<_CategoryRow> {
                           textInputAction: TextInputAction.done,
                         ),
                 ),
-                const SizedBox(width: 6),
+                const SizedBox(width: 4),
+                Tooltip(
+                  message: widget.count == 0
+                      ? 'No blocks to clear'
+                      : 'Remove every block in ${widget.track.name}',
+                  child: InkWell(
+                    onTap: widget.count == 0 ? null : widget.onAskClear,
+                    borderRadius: BorderRadius.circular(5),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 4,
+                        vertical: 4,
+                      ),
+                      child: Text(
+                        'Clear',
+                        style: TextStyle(
+                          fontSize: 9.5,
+                          fontWeight: FontWeight.w600,
+                          color: widget.count == 0
+                              ? AppColors.faint.withValues(alpha: .45)
+                              : const Color(0xFFD9A5A5),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 4),
                 Text(
                   '${widget.count} ${widget.count == 1 ? 'block' : 'blocks'}',
                   style: const TextStyle(fontSize: 9.5, color: AppColors.faint),
@@ -487,6 +650,49 @@ class _CategoryRowState extends State<_CategoryRow> {
                 ],
               ),
             ),
+          if (widget.clearOpen)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.fromLTRB(11, 8, 9, 8),
+              decoration: const BoxDecoration(
+                color: Color(0xFF21191B),
+                borderRadius: BorderRadius.vertical(bottom: Radius.circular(9)),
+              ),
+              child: Wrap(
+                alignment: WrapAlignment.spaceBetween,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                spacing: 10,
+                runSpacing: 8,
+                children: <Widget>[
+                  Text(
+                    'Clear “${widget.track.name}”? ${widget.count} '
+                    '${widget.count == 1 ? 'block' : 'blocks'} will be deleted.',
+                    style: const TextStyle(
+                      fontSize: 10,
+                      height: 1.35,
+                      color: Color(0xFFD4B7B7),
+                    ),
+                  ),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      ToastButton(
+                        label: 'Cancel',
+                        height: 28,
+                        onPressed: widget.onAskClear,
+                      ),
+                      const SizedBox(width: 6),
+                      ToastButton(
+                        label: 'Clear',
+                        height: 28,
+                        danger: true,
+                        onPressed: widget.onClear,
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
           if (widget.confirmOpen)
             Container(
               width: double.infinity,
@@ -536,6 +742,22 @@ class _CategoryRowState extends State<_CategoryRow> {
   }
 }
 
+class _DragGrip extends StatelessWidget {
+  const _DragGrip();
+
+  @override
+  Widget build(BuildContext context) {
+    return const SizedBox(
+      width: 44,
+      height: 44,
+      child: ColoredBox(
+        color: Colors.transparent,
+        child: Icon(Icons.drag_indicator, size: 18, color: AppColors.faint),
+      ),
+    );
+  }
+}
+
 class _TemplateList extends StatelessWidget {
   const _TemplateList({required this.store});
 
@@ -558,17 +780,14 @@ class _TemplateList extends StatelessWidget {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: <Widget>[
-                Container(
-                  width: 7,
-                  height: 7,
-                  decoration: BoxDecoration(
-                    color: store.trackOrUncategorized(template.trackId).color,
-                    shape: BoxShape.circle,
-                  ),
+                _TemplateIcon(
+                  template: template,
+                  color: store.trackOrUncategorized(template.trackId).color,
                 ),
                 const SizedBox(width: 6),
                 Text(
-                  '${template.title} · ${fmtDuration(Duration(minutes: template.durationMinutes))}',
+                  '${template.title} · '
+                  '${template.isMulti ? '${template.blockCount} blocks' : fmtDuration(Duration(minutes: template.durationMinutes))}',
                   style: const TextStyle(fontSize: 10.5),
                 ),
                 const SizedBox(width: 3),
@@ -584,6 +803,59 @@ class _TemplateList extends StatelessWidget {
             ),
           ),
       ],
+    );
+  }
+}
+
+class _TemplateIcon extends StatelessWidget {
+  const _TemplateIcon({required this.template, required this.color});
+
+  final Template template;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    final int count = template.isMulti ? math.min(3, template.blockCount) : 1;
+    if (count == 1) {
+      return Container(
+        width: 18,
+        height: 18,
+        alignment: Alignment.center,
+        child: Container(
+          width: 14,
+          height: 7,
+          decoration: BoxDecoration(
+            color: AppColors.alpha(color, .34),
+            borderRadius: BorderRadius.circular(2),
+            border: Border.all(color: AppColors.alpha(color, .8)),
+          ),
+        ),
+      );
+    }
+    return SizedBox(
+      width: 18,
+      height: 18,
+      child: Stack(
+        children: <Widget>[
+          for (int index = 0; index < count; index++)
+            Positioned(
+              left: 1.0 + index * 2,
+              top: 1.5 + index * 4.5,
+              child: Container(
+                width: 13 - index * 1.5,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: AppColors.alpha(color, .72 - index * .14),
+                  borderRadius: BorderRadius.circular(1.5),
+                  border: Border.all(
+                    color: AppColors.alpha(color, .86),
+                    width: .7,
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
     );
   }
 }
@@ -759,10 +1031,13 @@ class _BlockEditorSheetState extends State<_BlockEditorSheet> {
                 itemBuilder: (BuildContext context, int index) {
                   final Template template = store.templates[index];
                   return ToastButton(
-                    label:
-                        '${template.title} · ${fmtDuration(Duration(minutes: template.durationMinutes))}',
-                    icon: Icons.bolt_outlined,
-                    height: 30,
+                    label: template.isMulti
+                        ? '${template.title} · ${template.blockCount} blocks'
+                        : '${template.title} · ${fmtDuration(Duration(minutes: template.durationMinutes))}',
+                    icon: template.isMulti
+                        ? Icons.view_week_outlined
+                        : Icons.view_timeline_outlined,
+                    height: 34,
                     onPressed: () => _applyTemplate(template),
                   );
                 },
@@ -888,22 +1163,14 @@ class _BlockEditorSheetState extends State<_BlockEditorSheet> {
             ],
           ),
           const SizedBox(height: 8),
-          Wrap(
-            spacing: 6,
-            runSpacing: 6,
-            children: <Widget>[
-              for (final int minutes in <int>[15, 30, 60, 120])
-                ToastButton(
-                  label: '+${fmtDuration(Duration(minutes: minutes))}',
-                  height: 27,
-                  onPressed: () {
-                    setState(() {
-                      _end = _start.add(Duration(minutes: minutes));
-                      _error = null;
-                    });
-                  },
-                ),
-            ],
+          _DurationStepper(
+            onDelta: (int minutes) {
+              setState(() {
+                final int next = _end.difference(_start).inMinutes + minutes;
+                _end = _start.add(Duration(minutes: math.max(5, next)));
+                _error = null;
+              });
+            },
           ),
           const SizedBox(height: 15),
           const _SectionLabel('Behaviour'),
@@ -976,15 +1243,42 @@ class _BlockEditorSheetState extends State<_BlockEditorSheet> {
     );
   }
 
-  void _applyTemplate(Template template) {
+  Future<void> _applyTemplate(Template template) async {
+    if (template.isMulti) {
+      if (!widget.isNew) {
+        await showAppToast(
+          context,
+          'Multi-block templates can be added from the NEW block editor',
+        );
+        return;
+      }
+      final bool yes = await showConfirm(
+        context,
+        title: 'Add ${template.blockCount} blocks?',
+        message:
+            'Add “${template.title}” starting at ${fmtTime(_start)} on ${fmtDayLong(_start)}.',
+        confirm: 'Add blocks',
+        danger: false,
+      );
+      if (!yes || !mounted) return;
+      final List<Block> added = store.addBlocksFromTemplate(template, _start);
+      if (added.isEmpty || !mounted) return;
+      Navigator.of(context).pop(added.first);
+      return;
+    }
+    final TemplatePart? part = template.parts.isEmpty
+        ? null
+        : template.parts.first;
     setState(() {
-      _title.text = template.title;
-      _trackId = template.trackId;
+      _title.text = part?.title ?? template.title;
+      _trackId = part?.trackId ?? template.trackId;
       if (store.trackById(_trackId) == null) _trackId = 'uncat';
-      _kind = template.kind;
-      _alarm = template.alarm;
-      _repeat = template.repeat;
-      _end = _start.add(Duration(minutes: template.durationMinutes));
+      _kind = part?.kind ?? template.kind;
+      _alarm = part?.alarm ?? template.alarm;
+      _repeat = part?.repeat ?? template.repeat;
+      _end = _start.add(
+        Duration(minutes: part?.durationMinutes ?? template.durationMinutes),
+      );
       _error = null;
     });
   }
@@ -1141,6 +1435,7 @@ class _BlockEditorSheetState extends State<_BlockEditorSheet> {
       alarm: _alarm,
       repeat: _repeat,
       seriesId: original?.seriesId,
+      lane: original?.lane,
     );
     final Block? saved = store.saveBlock(draft, isNew: widget.isNew);
     if (saved == null) {
@@ -1148,6 +1443,362 @@ class _BlockEditorSheetState extends State<_BlockEditorSheet> {
       return;
     }
     Navigator.of(context).pop(saved);
+  }
+}
+
+class _BatchEditorSheet extends StatefulWidget {
+  const _BatchEditorSheet({required this.store, required this.blocks});
+
+  final TimelineStore store;
+  final List<Block> blocks;
+
+  @override
+  State<_BatchEditorSheet> createState() => _BatchEditorSheetState();
+}
+
+class _BatchEditorSheetState extends State<_BatchEditorSheet> {
+  late bool _titleOn = false;
+  late bool _trackOn = false;
+  late bool _kindOn = false;
+  late bool _alarmOn = false;
+  late bool _repeatOn = false;
+  late bool _durationOn = false;
+  late String _trackId;
+  late BlockKind _kind;
+  late bool _alarm;
+  late Recurrence _repeat;
+  int _durationDelta = 0;
+  late final TextEditingController _titleController;
+
+  TimelineStore get store => widget.store;
+  Set<int> get _ids => widget.blocks.map((Block block) => block.id).toSet();
+
+  @override
+  void initState() {
+    super.initState();
+    final Block first = widget.blocks.first;
+    _trackId = first.trackId;
+    _kind = first.kind;
+    _alarm = first.alarm;
+    _repeat = first.repeat;
+    final String firstTitle = first.title;
+    final bool sameTitle = widget.blocks.every(
+      (Block block) => block.title == firstTitle,
+    );
+    _titleController = TextEditingController(text: sameTitle ? firstTitle : '');
+  }
+
+  @override
+  void dispose() {
+    _titleController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SheetFrame(
+      kicker: 'Batch edit',
+      title: '${widget.blocks.length} blocks selected',
+      subtitle: 'Only the fields you switch on are changed. Changes are saved as one undo step.',
+      onClose: () => Navigator.of(context).pop(false),
+      footer: Row(
+        children: <Widget>[
+          TextButton.icon(
+            onPressed: _delete,
+            icon: const Icon(Icons.delete_outline, size: 16),
+            label: const Text('Delete'),
+            style: TextButton.styleFrom(foregroundColor: AppColors.danger),
+          ),
+          const Spacer(),
+          ToastButton(
+            label: 'Cancel',
+            onPressed: () => Navigator.of(context).pop(false),
+          ),
+          const SizedBox(width: 7),
+          ToastButton(label: 'Apply', primary: true, onPressed: _apply),
+        ],
+      ),
+      body: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          _SheetTip(
+            text:
+                'These blocks stay at their current times unless you adjust duration. '
+                'Repeating blocks follow the same series rules as the single editor.',
+          ),
+          const SizedBox(height: 12),
+          _BatchFieldCard(
+            label: 'Title',
+            value: _titleOn,
+            onChanged: (bool value) => setState(() => _titleOn = value),
+            child: TextField(
+              controller: _titleController,
+              maxLength: 60,
+              style: const TextStyle(fontSize: 12),
+              decoration: const InputDecoration(
+                counterText: '',
+                isDense: true,
+                hintText: 'Leave blank to keep current titles',
+                contentPadding: EdgeInsets.symmetric(
+                  horizontal: 8,
+                  vertical: 8,
+                ),
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ),
+          const SizedBox(height: 9),
+          _BatchFieldCard(
+            label: 'Category',
+            value: _trackOn,
+            onChanged: (bool value) => setState(() => _trackOn = value),
+            child: _DropdownBox<String>(
+              value: _trackId,
+              items: <DropdownMenuItem<String>>[
+                for (final Track track in store.displayTracks)
+                  DropdownMenuItem<String>(
+                    value: track.id,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: <Widget>[
+                        _ColorDot(track.color),
+                        const SizedBox(width: 7),
+                        Text(track.name),
+                      ],
+                    ),
+                  ),
+              ],
+              onChanged: (String? value) {
+                if (value != null) setState(() => _trackId = value);
+              },
+            ),
+          ),
+          const SizedBox(height: 9),
+          _BatchFieldCard(
+            label: 'Type',
+            value: _kindOn,
+            onChanged: (bool value) => setState(() => _kindOn = value),
+            child: _DropdownBox<BlockKind>(
+              value: _kind,
+              items: const <DropdownMenuItem<BlockKind>>[
+                DropdownMenuItem<BlockKind>(
+                  value: BlockKind.event,
+                  child: Text('Event'),
+                ),
+                DropdownMenuItem<BlockKind>(
+                  value: BlockKind.zone,
+                  child: Text('Zone'),
+                ),
+              ],
+              onChanged: (BlockKind? value) {
+                if (value != null) setState(() => _kind = value);
+              },
+            ),
+          ),
+          const SizedBox(height: 9),
+          _BatchFieldCard(
+            label: 'Alarm',
+            value: _alarmOn,
+            onChanged: (bool value) => setState(() => _alarmOn = value),
+            child: Row(
+              children: <Widget>[
+                const Expanded(
+                  child: Text(
+                    'Notify at the start time',
+                    style: TextStyle(fontSize: 11.5),
+                  ),
+                ),
+                Switch.adaptive(
+                  value: _alarm,
+                  onChanged: (bool value) => setState(() => _alarm = value),
+                  activeTrackColor: AppColors.alpha(AppColors.accent, .7),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 9),
+          _BatchFieldCard(
+            label: 'Repeat',
+            value: _repeatOn,
+            onChanged: (bool value) => setState(() => _repeatOn = value),
+            child: _DropdownBox<Recurrence>(
+              value: _repeat,
+              items: <DropdownMenuItem<Recurrence>>[
+                for (final Recurrence value in Recurrence.values)
+                  DropdownMenuItem<Recurrence>(
+                    value: value,
+                    child: Text(value.label),
+                  ),
+              ],
+              onChanged: (Recurrence? value) {
+                if (value != null) setState(() => _repeat = value);
+              },
+            ),
+          ),
+          const SizedBox(height: 9),
+          _BatchFieldCard(
+            label: 'Duration',
+            value: _durationOn,
+            onChanged: (bool value) => setState(() {
+              _durationOn = value;
+              if (!value) _durationDelta = 0;
+            }),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(
+                  _durationDelta == 0
+                      ? 'Tap a step to adjust every selected block'
+                      : '${_durationDelta > 0 ? '+' : ''}${fmtDuration(Duration(minutes: _durationDelta.abs()))} per block',
+                  style: const TextStyle(
+                    fontSize: 10.5,
+                    color: AppColors.faint,
+                  ),
+                ),
+                const SizedBox(height: 7),
+                _DurationStepper(
+                  onDelta: (int minutes) {
+                    setState(() {
+                      _durationOn = true;
+                      _durationDelta += minutes;
+                    });
+                  },
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 15),
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: ToastButton(
+                  label: 'Save selection as template',
+                  icon: Icons.bookmark_add_outlined,
+                  onPressed: _saveTemplate,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _apply() {
+    store.batchEditBlocks(
+      _ids,
+      trackId: _trackOn ? _trackId : null,
+      title: _titleOn ? _titleController.text : null,
+      kind: _kindOn ? _kind : null,
+      alarm: _alarmOn ? _alarm : null,
+      repeat: _repeatOn ? _repeat : null,
+      durationDeltaMinutes: _durationOn ? _durationDelta : 0,
+    );
+    Navigator.of(context).pop(true);
+  }
+
+  void _saveTemplate() {
+    store.addTemplateFromBlocks(widget.blocks);
+    showAppToast(
+      context,
+      'Saved ${widget.blocks.length} ${widget.blocks.length == 1 ? 'block' : 'blocks'} as a template',
+    );
+    setState(() {});
+  }
+
+  Future<void> _delete() async {
+    final bool yes = await showConfirm(
+      context,
+      title: 'Delete ${widget.blocks.length} blocks?',
+      message:
+          'The selected ${widget.blocks.length == 1 ? 'block' : 'blocks'} will be removed from the timeline.',
+    );
+    if (!yes || !mounted) return;
+    store.deleteBlocks(_ids);
+    Navigator.of(context).pop(true);
+  }
+}
+
+class _BatchFieldCard extends StatelessWidget {
+  const _BatchFieldCard({
+    required this.label,
+    required this.value,
+    required this.onChanged,
+    required this.child,
+  });
+
+  final String label;
+  final bool value;
+  final ValueChanged<bool> onChanged;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(10, 8, 10, 9),
+      decoration: BoxDecoration(
+        color: const Color(0xFF11151B),
+        borderRadius: BorderRadius.circular(9),
+        border: Border.all(color: AppColors.line),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          InkWell(
+            onTap: () => onChanged(!value),
+            borderRadius: BorderRadius.circular(6),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 2),
+              child: Row(
+                children: <Widget>[
+                  Icon(
+                    value ? Icons.check_box : Icons.check_box_outline_blank,
+                    size: 17,
+                    color: value ? AppColors.accent : AppColors.faint,
+                  ),
+                  const SizedBox(width: 7),
+                  Text(
+                    label,
+                    style: const TextStyle(
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w600,
+                      color: AppColors.text,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (value) ...<Widget>[const SizedBox(height: 8), child],
+        ],
+      ),
+    );
+  }
+}
+
+class _DurationStepper extends StatelessWidget {
+  const _DurationStepper({required this.onDelta});
+
+  final ValueChanged<int> onDelta;
+
+  static const List<int> _deltas = <int>[-60, -30, -5, 5, 30, 60];
+
+  @override
+  Widget build(BuildContext context) {
+    return Wrap(
+      spacing: 6,
+      runSpacing: 7,
+      children: <Widget>[
+        for (final int minutes in _deltas)
+          ToastButton(
+            label: minutes > 0
+                ? '+${fmtDuration(Duration(minutes: minutes))}'
+                : '-${fmtDuration(Duration(minutes: -minutes))}',
+            height: 42,
+            onPressed: () => onDelta(minutes),
+          ),
+      ],
+    );
   }
 }
 
