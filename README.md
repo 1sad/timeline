@@ -7,15 +7,15 @@ Timeline is a finite eight-day planner for tracking events during the day, built
 ## Features
 
 - Eight-day canvas with zoom from one hour to the full range
-- Events and zones arranged in category tracks, with vertical lanes that persist
-- Drag, resize, create, edit, and undo directly on the timeline
+- Events and zones arranged in category tracks that are one lane tall until you drag a block into a lower lane
+- Tap a block to select it, then drag or resize; undo directly from the toolbar
 - Multi-select with Ctrl+click and Shift+drag on Windows, or long-press on Android
-- Batch edit or delete selected blocks and save a whole selection as a reusable template
+- Batch edit or delete selected blocks, combine them into one block, or save the selection as a reusable template
 - Reorder or clear categories, with inline confirmation and undo
-- Single-block and multi-block templates, recurring events, alarms, and a lock mode
+- Single-block and multi-block templates, daily or hourly repeats with day/hour pickers, start/middle/end alarms, and a lock mode
 - Quick duration steps from five minutes to one hour
 - JSON import and export for local backups and moving data
-- Windows tray support and Android notifications
+- Windows tray support and Android notifications with the system sound
 
 ## Requirements
 

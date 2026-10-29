@@ -95,7 +95,7 @@ class RulerPainter extends CustomPainter {
       ..color = AppColors.alpha(Colors.white, .055)
       ..strokeWidth = 1;
     final Paint dayPaint = Paint()
-      ..color = AppColors.alpha(Colors.white, .13)
+      ..color = AppColors.alpha(Colors.white, .16)
       ..strokeWidth = 1;
 
     final DateTime firstDay = startOfLocalDay(viewStart);
@@ -256,41 +256,59 @@ class TimelineBackgroundPainter extends CustomPainter {
   final TimelineLayout layout;
   final double height;
 
+  static const Color _weekendTint = Color(0x07FFFFFF);
+  static const Color _nightTint = Color(0x1A000000);
+  static const Color _hourLine = Color(0x0BFFFFFF);
+  static const Color _majorLine = Color(0x14FFFFFF);
+  static const Color _midnightLine = Color(0x24FFFFFF);
+  static const Color _rowLine = Color(0x10FFFFFF);
+
   @override
   void paint(Canvas canvas, Size size) {
-    final DateTime firstDay = startOfLocalDay(layout.viewStart);
-    final DateTime lastDay = startOfLocalDay(layout.viewEnd);
-    DateTime day = firstDay;
+    canvas.drawRect(
+      Rect.fromLTWH(0, 0, layout.width, height),
+      Paint()..color = AppColors.canvas,
+    );
+    if (layout.metrics.isEmpty) return;
 
+    // Day fills are drawn edge-to-edge with anti-aliasing off so neighbouring
+    // days cannot double-blend into a seam or a soft gradient.
+    final Paint fill = Paint()..isAntiAlias = false;
+    DateTime day = startOfLocalDay(layout.viewStart);
+    final DateTime lastDay = startOfLocalDay(layout.viewEnd);
     while (!day.isAfter(lastDay)) {
       final DateTime nextDay = addLocalDays(day, 1);
-      final double x1 = layout.xOf(day);
-      final double x2 = layout.xOf(nextDay);
-      final double left = math.max(0, x1);
-      final double right = math.min(layout.width, x2);
+      final double left = math.max(0, layout.xOf(day));
+      final double right = math.min(layout.width, layout.xOf(nextDay));
       if (right > left) {
-        if (day.weekday == DateTime.saturday ||
-            day.weekday == DateTime.sunday) {
+        final bool weekend =
+            day.weekday == DateTime.saturday || day.weekday == DateTime.sunday;
+        if (weekend) {
           canvas.drawRect(
-            Rect.fromLTWH(left, 0, right - left, height),
-            Paint()..color = const Color(0x0DFFFFFF),
+            Rect.fromLTRB(left, 0, right, height),
+            fill..color = _weekendTint,
           );
         }
-        final DateTime nightStart = atLocalTime(day, 0, 0);
-        final DateTime morningEnd = atLocalTime(day, 7, 0);
-        final DateTime eveningStart = atLocalTime(day, 20, 0);
-        _rect(
-          canvas,
-          layout.xOf(nightStart),
-          layout.xOf(morningEnd),
-          const Color(0x1A000000),
-        );
-        _rect(
-          canvas,
-          layout.xOf(eveningStart),
-          layout.xOf(nextDay),
-          const Color(0x1A000000),
-        );
+        final double morningEnd = layout
+            .xOf(atLocalTime(day, 7, 0))
+            .clamp(left, right)
+            .toDouble();
+        if (morningEnd > left) {
+          canvas.drawRect(
+            Rect.fromLTRB(left, 0, morningEnd, height),
+            fill..color = _nightTint,
+          );
+        }
+        final double eveningStart = layout
+            .xOf(atLocalTime(day, 20, 0))
+            .clamp(left, right)
+            .toDouble();
+        if (right > eveningStart) {
+          canvas.drawRect(
+            Rect.fromLTRB(eveningStart, 0, right, height),
+            fill..color = _nightTint,
+          );
+        }
       }
       day = addLocalDays(day, 1);
     }
@@ -304,15 +322,16 @@ class TimelineBackgroundPainter extends CustomPainter {
         ? 6
         : 12;
     final Paint hourPaint = Paint()
-      ..color = const Color(0x0BFFFFFF)
+      ..color = _hourLine
       ..strokeWidth = 1;
     final Paint majorPaint = Paint()
-      ..color = const Color(0x14FFFFFF)
+      ..color = _majorLine
       ..strokeWidth = 1;
 
-    day = firstDay;
+    day = startOfLocalDay(layout.viewStart);
     while (!day.isAfter(lastDay)) {
       for (int hour = 0; hour < 24; hour += step) {
+        if (hour == 0) continue;
         final DateTime tick = atLocalTime(day, hour, 0);
         if (tick.isBefore(layout.viewStart) || !tick.isBefore(layout.viewEnd)) {
           continue;
@@ -327,8 +346,22 @@ class TimelineBackgroundPainter extends CustomPainter {
       day = addLocalDays(day, 1);
     }
 
+    // Midnight is the only line that separates days, so it gets one extra
+    // step of contrast without turning into a bright column.
+    final Paint midnightPaint = Paint()
+      ..color = _midnightLine
+      ..strokeWidth = 1;
+    day = startOfLocalDay(layout.viewStart);
+    while (!day.isAfter(lastDay)) {
+      final double x = layout.xOf(day);
+      if (x >= 0 && x <= layout.width) {
+        canvas.drawLine(Offset(x, 0), Offset(x, height), midnightPaint);
+      }
+      day = addLocalDays(day, 1);
+    }
+
     final Paint separator = Paint()
-      ..color = const Color(0x10FFFFFF)
+      ..color = _rowLine
       ..strokeWidth = 1;
     for (final TrackMetrics metric in layout.metrics.values) {
       canvas.drawLine(
@@ -337,22 +370,6 @@ class TimelineBackgroundPainter extends CustomPainter {
         separator,
       );
     }
-    if (layout.metrics.isEmpty) {
-      canvas.drawRect(
-        Rect.fromLTWH(0, 0, layout.width, height),
-        Paint()..color = AppColors.canvas,
-      );
-    }
-  }
-
-  void _rect(Canvas canvas, double a, double b, Color color) {
-    final double left = math.max(0, a);
-    final double right = math.min(layout.width, b);
-    if (right <= left) return;
-    canvas.drawRect(
-      Rect.fromLTWH(left, 0, right - left, height),
-      Paint()..color = color,
-    );
   }
 
   @override
@@ -438,7 +455,7 @@ class MinimapPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     if (size.width <= 0 || size.height <= 0) return;
     final Paint dayPaint = Paint()
-      ..color = const Color(0x14FFFFFF)
+      ..color = const Color(0x20FFFFFF)
       ..strokeWidth = 1;
 
     DateTime day = startOfLocalDay(rangeStart);
@@ -450,7 +467,7 @@ class MinimapPainter extends CustomPainter {
           final double next = _xOf(addLocalDays(day, 1), size.width);
           canvas.drawRect(
             Rect.fromLTWH(x, 0, math.max(0, next - x), size.height),
-            Paint()..color = const Color(0x0DFFFFFF),
+            Paint()..color = const Color(0x07FFFFFF),
           );
         }
         canvas.drawLine(Offset(x, 0), Offset(x, size.height), dayPaint);

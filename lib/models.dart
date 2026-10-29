@@ -100,6 +100,26 @@ String blockMeta(Block block, DateTime now) {
   return fmtDuration(block.end.difference(block.start));
 }
 
+/// Just the moving part of a block's timing: "in 20m", "35m left" or nothing
+/// once the block has finished.
+String blockRelativeMeta(Block block, DateTime now) {
+  if (!now.isBefore(block.start) && now.isBefore(block.end)) {
+    return '${fmtDuration(block.end.difference(now))} left';
+  }
+  if (now.isBefore(block.start)) {
+    return 'in ${fmtDuration(block.start.difference(now))}';
+  }
+  return '';
+}
+
+/// Total length plus how far away or how much is left. Used by headers where
+/// the total duration should always be visible exactly once.
+String blockTiming(Block block, DateTime now) {
+  final String total = fmtDuration(block.end.difference(block.start));
+  final String relative = blockRelativeMeta(block, now);
+  return relative.isEmpty ? total : '$total · $relative';
+}
+
 String zoomLabel(double hours) {
   if ((hours - 24).abs() < .01) return '1d';
   if ((hours - 72).abs() < .01) return '3d';
@@ -132,54 +152,230 @@ String hexFromColor(int value) {
 
 enum BlockKind { event, zone }
 
-enum Recurrence { none, daily, weekdays, weekly }
+/// Points inside a block where a notification can fire.
+enum AlarmOffset { start, middle, end }
+
+extension AlarmOffsetLabel on AlarmOffset {
+  String get label {
+    switch (this) {
+      case AlarmOffset.start:
+        return 'Start';
+      case AlarmOffset.middle:
+        return 'Middle';
+      case AlarmOffset.end:
+        return 'End';
+    }
+  }
+
+  /// The exact instant this offset points at, or null for a block that has no
+  /// length.
+  DateTime? timeFor(Block block) {
+    final Duration span = block.end.difference(block.start);
+    if (span <= Duration.zero) return null;
+    switch (this) {
+      case AlarmOffset.start:
+        return block.start;
+      case AlarmOffset.middle:
+        return block.start.add(
+          Duration(milliseconds: span.inMilliseconds ~/ 2),
+        );
+      case AlarmOffset.end:
+        return block.end;
+    }
+  }
+
+  static AlarmOffset? parse(Object? value) {
+    for (final AlarmOffset offset in AlarmOffset.values) {
+      if (offset.name == value) return offset;
+    }
+    return null;
+  }
+}
+
+enum RepeatCadence { none, daily, hourly }
+
+/// How a block repeats.
+///
+/// Daily repeats use ISO weekdays (Mon = 1 … Sun = 7). Hourly repeats use
+/// 24-hour clock hours and keep the block's start minute. An empty selection
+/// means the block does not repeat.
+class RepeatSpec {
+  const RepeatSpec({
+    this.mode = RepeatCadence.none,
+    this.days = const <int>{},
+    this.hours = const <int>{},
+  });
+
+  const RepeatSpec.daily([this.days = allDays])
+    : mode = RepeatCadence.daily,
+      hours = const <int>{};
+
+  const RepeatSpec.hourly([this.hours = const <int>{}])
+    : mode = RepeatCadence.hourly,
+      days = const <int>{};
+
+  static const Set<int> allDays = <int>{1, 2, 3, 4, 5, 6, 7};
+  static const Set<int> weekdays = <int>{1, 2, 3, 4, 5};
+  static const Set<int> allHours = <int>{
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+  };
+
+  static const RepeatSpec none = RepeatSpec();
+
+  final RepeatCadence mode;
+  final Set<int> days;
+  final Set<int> hours;
+
+  bool get active => mode != RepeatCadence.none;
+  bool get isDaily => mode == RepeatCadence.daily;
+  bool get isHourly => mode == RepeatCadence.hourly;
+
+  bool get isValid {
+    switch (mode) {
+      case RepeatCadence.none:
+        return true;
+      case RepeatCadence.daily:
+        return days.isNotEmpty;
+      case RepeatCadence.hourly:
+        return hours.isNotEmpty;
+    }
+  }
+
+  List<int> get sortedDays => days.toList(growable: false)..sort();
+  List<int> get sortedHours => hours.toList(growable: false)..sort();
+
+  String get label {
+    switch (mode) {
+      case RepeatCadence.none:
+        return 'Does not repeat';
+      case RepeatCadence.daily:
+        return 'Daily';
+      case RepeatCadence.hourly:
+        return 'Hourly';
+    }
+  }
+
+  String get summary {
+    switch (mode) {
+      case RepeatCadence.none:
+        return 'Does not repeat';
+      case RepeatCadence.daily:
+        if (days.length == allDays.length) return 'Every day';
+        return sortedDays.map(shortWeekday).join(', ');
+      case RepeatCadence.hourly:
+        if (hours.length == allHours.length) return 'Every hour';
+        return sortedHours.map(hourLabel).join(', ');
+    }
+  }
+
+  static String shortWeekday(int day) => _weekdays[day % 7];
+  static String hourLabel(int hour) => '${_pad2(hour)}:00';
+
+  RepeatSpec copyWith({RepeatCadence? mode, Set<int>? days, Set<int>? hours}) =>
+      RepeatSpec(
+        mode: mode ?? this.mode,
+        days: days ?? this.days,
+        hours: hours ?? this.hours,
+      );
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+    'mode': mode.name,
+    if (mode == RepeatCadence.daily) 'days': sortedDays,
+    if (mode == RepeatCadence.hourly) 'hours': sortedHours,
+  };
+
+  /// Accepts the current object shape and the older string values written by
+  /// Timeline 1.1 and earlier.
+  static RepeatSpec parse(Object? value, {DateTime? anchor}) {
+    if (value is Map) {
+      final Object? rawMode = value['mode'];
+      final RepeatCadence mode = RepeatCadence.values.firstWhere(
+        (RepeatCadence item) => item.name == rawMode,
+        orElse: () => RepeatCadence.none,
+      );
+      final Set<int> days = _intSet(value['days'])
+          .where((int day) => day >= 1 && day <= 7)
+          .toSet();
+      final Set<int> hours = _intSet(value['hours'])
+          .where((int hour) => hour >= 0 && hour <= 23)
+          .toSet();
+      if (mode == RepeatCadence.daily) {
+        return RepeatSpec(mode: mode, days: days);
+      }
+      if (mode == RepeatCadence.hourly) {
+        return RepeatSpec(mode: mode, hours: hours);
+      }
+      return RepeatSpec.none;
+    }
+    switch (value) {
+      case 'daily':
+        return const RepeatSpec.daily();
+      case 'weekdays':
+        return const RepeatSpec(mode: RepeatCadence.daily, days: weekdays);
+      case 'weekly':
+        return RepeatSpec(
+          mode: RepeatCadence.daily,
+          days: <int>{anchor?.weekday ?? DateTime.monday},
+        );
+      default:
+        return RepeatSpec.none;
+    }
+  }
+
+  static Set<int> _intSet(Object? value) {
+    if (value is! List) return <int>{};
+    return value
+        .map((Object? item) => item is num ? item.toInt() : null)
+        .whereType<int>()
+        .toSet();
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is RepeatSpec &&
+      other.mode == mode &&
+      _sameInts(other.days, days) &&
+      _sameInts(other.hours, hours);
+
+  @override
+  int get hashCode => Object.hash(
+    mode,
+    Object.hashAll(sortedDays),
+    Object.hashAll(sortedHours),
+  );
+
+  static bool _sameInts(Set<int> a, Set<int> b) =>
+      a.length == b.length && a.containsAll(b);
+}
 
 extension BlockKindJson on BlockKind {
   String get value => this == BlockKind.zone ? 'zone' : 'event';
 
   static BlockKind parse(Object? value) =>
       value == 'zone' ? BlockKind.zone : BlockKind.event;
-}
-
-extension RecurrenceJson on Recurrence {
-  String get value {
-    switch (this) {
-      case Recurrence.none:
-        return 'none';
-      case Recurrence.daily:
-        return 'daily';
-      case Recurrence.weekdays:
-        return 'weekdays';
-      case Recurrence.weekly:
-        return 'weekly';
-    }
-  }
-
-  String get label {
-    switch (this) {
-      case Recurrence.none:
-        return 'Does not repeat';
-      case Recurrence.daily:
-        return 'Every day';
-      case Recurrence.weekdays:
-        return 'Weekdays';
-      case Recurrence.weekly:
-        return 'Every week';
-    }
-  }
-
-  static Recurrence parse(Object? value) {
-    switch (value) {
-      case 'daily':
-        return Recurrence.daily;
-      case 'weekdays':
-        return Recurrence.weekdays;
-      case 'weekly':
-        return Recurrence.weekly;
-      default:
-        return Recurrence.none;
-    }
-  }
 }
 
 class Track {
@@ -227,11 +423,11 @@ class Block {
     required this.start,
     required this.end,
     this.kind = BlockKind.event,
-    this.alarm = false,
-    this.repeat = Recurrence.none,
+    Set<AlarmOffset> alarms = const <AlarmOffset>{},
+    this.repeat = RepeatSpec.none,
     this.seriesId,
     this.lane,
-  });
+  }) : alarms = Set<AlarmOffset>.of(alarms);
 
   int id;
   String trackId;
@@ -239,17 +435,18 @@ class Block {
   DateTime start;
   DateTime end;
   BlockKind kind;
-  bool alarm;
-  Recurrence repeat;
+  Set<AlarmOffset> alarms;
+  RepeatSpec repeat;
   int? seriesId;
 
-  /// Explicit vertical lane. Null means the block has never been positioned
-  /// vertically and the layout may pack it automatically.
+  /// Explicit vertical lane. Null means the block sits in the first lane and
+  /// the row only grows when a block is dragged into a lower lane.
   int? lane;
 
   bool get isZone => kind == BlockKind.zone;
   Duration get duration => end.difference(start);
-  bool get repeats => repeat != Recurrence.none;
+  bool get repeats => repeat.active;
+  bool get alarm => alarms.isNotEmpty;
 
   Block copyWith({
     int? id,
@@ -258,8 +455,8 @@ class Block {
     DateTime? start,
     DateTime? end,
     BlockKind? kind,
-    bool? alarm,
-    Recurrence? repeat,
+    Set<AlarmOffset>? alarms,
+    RepeatSpec? repeat,
     int? seriesId,
     bool clearSeriesId = false,
     int? lane,
@@ -271,7 +468,7 @@ class Block {
     start: start ?? this.start,
     end: end ?? this.end,
     kind: kind ?? this.kind,
-    alarm: alarm ?? this.alarm,
+    alarms: alarms ?? this.alarms,
     repeat: repeat ?? this.repeat,
     seriesId: clearSeriesId ? null : (seriesId ?? this.seriesId),
     lane: clearLane ? null : (lane ?? this.lane),
@@ -284,8 +481,9 @@ class Block {
     'start': start.millisecondsSinceEpoch,
     'end': end.millisecondsSinceEpoch,
     if (kind == BlockKind.zone) 'type': 'zone',
-    if (alarm) 'alarm': true,
-    if (repeat != Recurrence.none) 'repeat': repeat.value,
+    if (alarms.isNotEmpty)
+      'alarm': alarms.map((AlarmOffset offset) => offset.name).toList(),
+    if (repeat.active) 'repeat': repeat.toJson(),
     if (seriesId != null) 'seriesId': seriesId,
     if (lane != null) 'lane': lane,
   };
@@ -308,8 +506,8 @@ class Block {
       start: parsedStart,
       end: parsedEnd,
       kind: BlockKindJson.parse(json['type'] ?? json['kind']),
-      alarm: json['alarm'] == true,
-      repeat: RecurrenceJson.parse(json['repeat']),
+      alarms: parseAlarms(json['alarm'] ?? json['alarms']),
+      repeat: RepeatSpec.parse(json['repeat'], anchor: parsedStart),
       seriesId: json['seriesId'] is num
           ? (json['seriesId'] as num).toInt()
           : int.tryParse('${json['seriesId'] ?? ''}'),
@@ -318,6 +516,19 @@ class Block {
           : int.tryParse('${json['lane'] ?? ''}'),
     );
   }
+}
+
+/// Reads both the current list shape and the older boolean `alarm` flag.
+Set<AlarmOffset> parseAlarms(Object? value) {
+  if (value == true) return <AlarmOffset>{AlarmOffset.start};
+  if (value is List) {
+    return value.map(AlarmOffsetLabel.parse).whereType<AlarmOffset>().toSet();
+  }
+  if (value is String) {
+    final AlarmOffset? offset = AlarmOffsetLabel.parse(value);
+    if (offset != null) return <AlarmOffset>{offset};
+  }
+  return <AlarmOffset>{};
 }
 
 DateTime? parseJsonTime(Object? value) {
@@ -344,17 +555,19 @@ class TemplatePart {
     required this.offsetMinutes,
     required this.durationMinutes,
     this.kind = BlockKind.event,
-    this.alarm = false,
-    this.repeat = Recurrence.none,
-  });
+    Set<AlarmOffset> alarms = const <AlarmOffset>{},
+    this.repeat = RepeatSpec.none,
+  }) : alarms = Set<AlarmOffset>.of(alarms);
 
   final String title;
   final String trackId;
   final int offsetMinutes;
   final int durationMinutes;
   final BlockKind kind;
-  final bool alarm;
-  final Recurrence repeat;
+  final Set<AlarmOffset> alarms;
+  final RepeatSpec repeat;
+
+  bool get alarm => alarms.isNotEmpty;
 
   Map<String, dynamic> toJson() => <String, dynamic>{
     'title': title,
@@ -362,8 +575,9 @@ class TemplatePart {
     'offsetMinutes': offsetMinutes,
     'durationMinutes': durationMinutes,
     if (kind == BlockKind.zone) 'type': 'zone',
-    if (alarm) 'alarm': true,
-    if (repeat != Recurrence.none) 'repeat': repeat.value,
+    if (alarms.isNotEmpty)
+      'alarm': alarms.map((AlarmOffset offset) => offset.name).toList(),
+    if (repeat.active) 'repeat': repeat.toJson(),
   };
 
   factory TemplatePart.fromJson(Map<String, dynamic> json) => TemplatePart(
@@ -375,8 +589,8 @@ class TemplatePart {
       _jsonInt(json['durationMinutes'] ?? json['minutes'], 60),
     ),
     kind: BlockKindJson.parse(json['type'] ?? json['kind']),
-    alarm: json['alarm'] == true,
-    repeat: RecurrenceJson.parse(json['repeat']),
+    alarms: parseAlarms(json['alarm'] ?? json['alarms']),
+    repeat: RepeatSpec.parse(json['repeat']),
   );
 }
 
@@ -387,18 +601,20 @@ class Template {
     required this.trackId,
     required this.durationMinutes,
     this.kind = BlockKind.event,
-    this.alarm = false,
-    this.repeat = Recurrence.none,
+    Set<AlarmOffset> alarms = const <AlarmOffset>{},
+    this.repeat = RepeatSpec.none,
     this.parts = const <TemplatePart>[],
-  });
+  }) : alarms = Set<AlarmOffset>.of(alarms);
 
   final int id;
   final String title;
   final String trackId;
   final int durationMinutes;
   final BlockKind kind;
-  final bool alarm;
-  final Recurrence repeat;
+  final Set<AlarmOffset> alarms;
+  final RepeatSpec repeat;
+
+  bool get alarm => alarms.isNotEmpty;
 
   /// Empty for a legacy single-block template. A multi-block selection has one
   /// part per block, with offsets measured from the earliest selected start.
@@ -413,8 +629,9 @@ class Template {
     'track': trackId,
     'durationMinutes': durationMinutes,
     if (kind == BlockKind.zone) 'type': 'zone',
-    if (alarm) 'alarm': true,
-    if (repeat != Recurrence.none) 'repeat': repeat.value,
+    if (alarms.isNotEmpty)
+      'alarm': alarms.map((AlarmOffset offset) => offset.name).toList(),
+    if (repeat.active) 'repeat': repeat.toJson(),
     if (parts.isNotEmpty)
       'parts': parts.map((TemplatePart part) => part.toJson()).toList(),
   };
@@ -443,8 +660,8 @@ class Template {
         _jsonInt(json['durationMinutes'] ?? json['minutes'], 60),
       ),
       kind: BlockKindJson.parse(json['type'] ?? json['kind']),
-      alarm: json['alarm'] == true,
-      repeat: RecurrenceJson.parse(json['repeat']),
+      alarms: parseAlarms(json['alarm'] ?? json['alarms']),
+      repeat: RepeatSpec.parse(json['repeat']),
       parts: parts,
     );
   }
@@ -566,6 +783,16 @@ class TimelineLayout {
     return null;
   }
 
+  /// Every block under [point], topmost first. Tapping again on an overlap
+  /// cycles through the stack so a buried block can still be selected.
+  List<TimelineSegment> hitTestAll(Offset point) {
+    final List<TimelineSegment> hits = <TimelineSegment>[];
+    for (final TimelineSegment segment in segments.reversed) {
+      if (segmentRect(segment).contains(point)) hits.add(segment);
+    }
+    return hits;
+  }
+
   /// Edge hit areas are deliberately a little larger than the 10px handles.
   ({TimelineSegment segment, bool left})? hitHandle(
     Offset point,
@@ -630,45 +857,12 @@ TimelineLayout buildTimelineLayout({
     );
   }
 
-  final Map<String, List<TimelineSegment>> groups =
-      <String, List<TimelineSegment>>{};
+  // Rows are one lane tall by default. A block only leaves the first lane when
+  // the user drags it into a lower one, so overlaps simply stack in lane 0.
+  // Lanes stay exactly as stored while dragging; the store removes empty
+  // leading lanes after a drop (see TimelineStore.normalizeLanes).
   for (final TimelineSegment segment in all) {
-    final String key = '${segment.trackId}|${segment.isZone}';
-    groups.putIfAbsent(key, () => <TimelineSegment>[]).add(segment);
-  }
-
-  for (final List<TimelineSegment> group in groups.values) {
-    group.sort((TimelineSegment a, TimelineSegment b) {
-      final int byStart = a.start.compareTo(b.start);
-      if (byStart != 0) return byStart;
-      return a.end.compareTo(b.end);
-    });
-    final List<DateTime> laneEnds = <DateTime>[];
-    for (final TimelineSegment segment in group) {
-      final int? explicitLane = segment.block.lane;
-      int lane;
-      if (explicitLane != null) {
-        lane = math.max(0, explicitLane);
-        while (laneEnds.length <= lane) {
-          laneEnds.add(segment.start);
-        }
-        if (laneEnds[lane].isBefore(segment.end)) {
-          laneEnds[lane] = segment.end;
-        }
-      } else {
-        lane = 0;
-        while (lane < laneEnds.length &&
-            laneEnds[lane].isAfter(segment.start)) {
-          lane++;
-        }
-        if (lane == laneEnds.length) {
-          laneEnds.add(segment.end);
-        } else {
-          laneEnds[lane] = segment.end;
-        }
-      }
-      segment.lane = lane;
-    }
+    segment.lane = math.max(0, segment.block.lane ?? 0);
   }
 
   final Map<String, int> maxZones = <String, int>{};
@@ -692,11 +886,12 @@ TimelineLayout buildTimelineLayout({
   double rowTop = 0;
   for (final Track track in tracks) {
     final int zones = maxZones[track.id] ?? 0;
-    final int events = math.max(1, maxEvents[track.id] ?? 0);
+    final int events = maxEvents[track.id] ?? 0;
     final bool collapsed = trackOpen[track.id] == false;
+    final double content = 8 + zones * 18 + (zones > 0 ? 6 : 0) + events * 42;
     final double height = collapsed
         ? 28
-        : 8 + zones * 18 + (zones > 0 ? 6 : 0) + events * 42;
+        : (zones == 0 && events == 0 ? 50 : content);
     metrics[track.id] = TrackMetrics(
       zones: zones,
       events: events,

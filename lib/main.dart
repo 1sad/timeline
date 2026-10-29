@@ -175,6 +175,7 @@ class _AppShellState extends State<AppShell>
       notifications: widget.notifications,
       onAlarm: _onAlarm,
     )..start();
+    widget.store.addListener(_onStoreForAlarms);
 
     if (Platform.isWindows) {
       windowManager.addListener(this);
@@ -184,8 +185,9 @@ class _AppShellState extends State<AppShell>
       });
     }
     if (Platform.isAndroid) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        unawaited(widget.notifications.requestPermission());
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        await widget.notifications.requestPermission();
+        await widget.notifications.sync(store);
       });
     }
     if (Platform.isWindows) {
@@ -201,7 +203,9 @@ class _AppShellState extends State<AppShell>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    widget.store.removeListener(_onStoreForAlarms);
     _alarmWatcher.dispose();
+    widget.notifications.dispose();
     if (Platform.isWindows) {
       windowManager.removeListener(this);
       trayManager.removeListener(this);
@@ -209,11 +213,22 @@ class _AppShellState extends State<AppShell>
     super.dispose();
   }
 
+  void _onStoreForAlarms() {
+    widget.notifications.syncDebounced(store);
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
       unawaited(store.flush());
+    }
+    if (state == AppLifecycleState.resumed) {
+      unawaited(
+        widget.notifications.refreshPermissions().then(
+          (_) => widget.notifications.sync(store),
+        ),
+      );
     }
   }
 
@@ -415,10 +430,13 @@ class _AppShellState extends State<AppShell>
     } catch (_) {}
   }
 
-  void _onAlarm(Block block) {
+  void _onAlarm(Block block, AlarmOffset offset) {
     if (!mounted) return;
     if (_trayMode) unawaited(_showMain());
-    final String message = 'Alarm · ${block.title} · ${fmtTime(block.start)}';
+    final DateTime? at = offset.timeFor(block);
+    final String message =
+        'Alarm · ${offset.label} · ${block.title}'
+        '${at == null ? '' : ' · ${fmtTime(at)}'}';
     Future<void>.delayed(const Duration(milliseconds: 230), () {
       if (!mounted) return;
       unawaited(

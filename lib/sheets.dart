@@ -947,8 +947,8 @@ class _BlockEditorSheetState extends State<_BlockEditorSheet> {
   late DateTime _start;
   late DateTime _end;
   late BlockKind _kind;
-  late bool _alarm;
-  late Recurrence _repeat;
+  late Set<AlarmOffset> _alarms;
+  late RepeatSpec _repeat;
   String? _error;
 
   TimelineStore get store => widget.store;
@@ -974,8 +974,8 @@ class _BlockEditorSheetState extends State<_BlockEditorSheet> {
             : roundedStart);
     _end = source?.end ?? _start.add(const Duration(hours: 1));
     _kind = source?.kind ?? BlockKind.event;
-    _alarm = source?.alarm ?? false;
-    _repeat = source?.repeat ?? Recurrence.none;
+    _alarms = Set<AlarmOffset>.of(source?.alarms ?? const <AlarmOffset>{});
+    _repeat = source?.repeat ?? RepeatSpec.none;
     _trackId = source?.trackId ?? store.tracks.firstOrNull?.id ?? 'uncat';
     if (store.trackById(_trackId) == null) _trackId = 'uncat';
   }
@@ -993,10 +993,10 @@ class _BlockEditorSheetState extends State<_BlockEditorSheet> {
       title: widget.isNew
           ? 'Add to the timeline'
           : (original?.title ?? 'Block'),
-      subtitle: widget.isNew
-          ? 'Pick a category, exact times, and whether this is a zone.'
-          : '${store.trackOrUncategorized(_trackId).name} · '
-                '${fmtTime(_start)}–${fmtTime(_end)}',
+      subtitle:
+          '${store.trackOrUncategorized(_trackId).name} · '
+          '${fmtDayLong(_start)} ${fmtTime(_start)}–${fmtTime(_end)} · '
+          '${_end.isAfter(_start) ? fmtDuration(_end.difference(_start)) : '—'}',
       onClose: () => Navigator.of(context).pop(),
       footer: Row(
         children: <Widget>[
@@ -1185,34 +1185,67 @@ class _BlockEditorSheetState extends State<_BlockEditorSheet> {
             ),
           ),
           const SizedBox(height: 7),
-          SheetToggleRow(
-            label: 'Alarm',
-            description: 'Notify at the start time while Timeline is running.',
-            value: _alarm,
-            onChanged: (bool value) => setState(() => _alarm = value),
+          _NotificationPicker(
+            alarms: _alarms,
+            onChanged: (Set<AlarmOffset> value) =>
+                setState(() => _alarms = value),
           ),
           const SizedBox(height: 11),
           SheetField(
             label: 'Repeat',
-            child: _DropdownBox<Recurrence>(
-              value: _repeat,
-              items: <DropdownMenuItem<Recurrence>>[
-                for (final Recurrence value in Recurrence.values)
-                  DropdownMenuItem<Recurrence>(
-                    value: value,
-                    child: Text(value.label),
-                  ),
+            child: _DropdownBox<RepeatCadence>(
+              value: _repeat.mode,
+              items: const <DropdownMenuItem<RepeatCadence>>[
+                DropdownMenuItem<RepeatCadence>(
+                  value: RepeatCadence.none,
+                  child: Text('Does not repeat'),
+                ),
+                DropdownMenuItem<RepeatCadence>(
+                  value: RepeatCadence.daily,
+                  child: Text('Daily'),
+                ),
+                DropdownMenuItem<RepeatCadence>(
+                  value: RepeatCadence.hourly,
+                  child: Text('Hourly'),
+                ),
               ],
-              onChanged: (Recurrence? value) {
-                if (value != null) setState(() => _repeat = value);
+              onChanged: (RepeatCadence? value) {
+                if (value != null) {
+                  setState(() {
+                    _repeat = _repeatWithMode(value);
+                    _error = null;
+                  });
+                }
               },
             ),
           ),
-          if (_repeat != Recurrence.none) ...<Widget>[
+          if (_repeat.isDaily) ...<Widget>[
+            const SizedBox(height: 8),
+            const _SectionLabel('Repeat on'),
             const SizedBox(height: 6),
-            const Text(
-              'Saving a repeating block updates the occurrences visible in the eight-day timeline.',
-              style: TextStyle(
+            _WeekdayPicker(
+              selected: _repeat.days,
+              onChanged: (Set<int> days) =>
+                  setState(() => _repeat = _repeat.copyWith(days: days)),
+            ),
+          ],
+          if (_repeat.isHourly) ...<Widget>[
+            const SizedBox(height: 8),
+            const _SectionLabel('Repeat at'),
+            const SizedBox(height: 6),
+            _HourPicker(
+              selected: _repeat.hours,
+              onChanged: (Set<int> hours) =>
+                  setState(() => _repeat = _repeat.copyWith(hours: hours)),
+            ),
+          ],
+          if (_repeat.active) ...<Widget>[
+            const SizedBox(height: 6),
+            Text(
+              _repeat.isDaily
+                  ? 'Occurrences are created on the ticked weekdays inside the eight-day timeline.'
+                  : 'Occurrences are created at the ticked hours inside the eight-day timeline.',
+              style: const TextStyle(
                 fontSize: 9.5,
                 height: 1.35,
                 color: AppColors.faint,
@@ -1241,6 +1274,27 @@ class _BlockEditorSheetState extends State<_BlockEditorSheet> {
         ],
       ),
     );
+  }
+
+  RepeatSpec _repeatWithMode(RepeatCadence mode) {
+    switch (mode) {
+      case RepeatCadence.none:
+        return RepeatSpec.none;
+      case RepeatCadence.daily:
+        return RepeatSpec(
+          mode: RepeatCadence.daily,
+          days: _repeat.isDaily && _repeat.days.isNotEmpty
+              ? _repeat.days
+              : RepeatSpec.allDays,
+        );
+      case RepeatCadence.hourly:
+        return RepeatSpec(
+          mode: RepeatCadence.hourly,
+          hours: _repeat.isHourly && _repeat.hours.isNotEmpty
+              ? _repeat.hours
+              : <int>{_start.hour},
+        );
+    }
   }
 
   Future<void> _applyTemplate(Template template) async {
@@ -1274,7 +1328,7 @@ class _BlockEditorSheetState extends State<_BlockEditorSheet> {
       _trackId = part?.trackId ?? template.trackId;
       if (store.trackById(_trackId) == null) _trackId = 'uncat';
       _kind = part?.kind ?? template.kind;
-      _alarm = part?.alarm ?? template.alarm;
+      _alarms = Set<AlarmOffset>.of(part?.alarms ?? template.alarms);
       _repeat = part?.repeat ?? template.repeat;
       _end = _start.add(
         Duration(minutes: part?.durationMinutes ?? template.durationMinutes),
@@ -1351,6 +1405,18 @@ class _BlockEditorSheetState extends State<_BlockEditorSheet> {
   }
 
   void _saveTemplate() {
+    if (_repeat.isDaily && _repeat.days.isEmpty) {
+      setState(
+        () => _error = 'Tick at least one day, or choose Does not repeat.',
+      );
+      return;
+    }
+    if (_repeat.isHourly && _repeat.hours.isEmpty) {
+      setState(
+        () => _error = 'Tick at least one hour, or choose Does not repeat.',
+      );
+      return;
+    }
     final String title = _title.text.trim().isEmpty
         ? 'Untitled'
         : _title.text.trim();
@@ -1361,7 +1427,7 @@ class _BlockEditorSheetState extends State<_BlockEditorSheet> {
       start: _start,
       end: _end,
       kind: _kind,
-      alarm: _alarm,
+      alarms: _alarms,
       repeat: _repeat,
     );
     store.addTemplateFromBlock(draft);
@@ -1372,7 +1438,7 @@ class _BlockEditorSheetState extends State<_BlockEditorSheet> {
   Future<void> _delete() async {
     final Block? block = original;
     if (block == null) return;
-    if (block.repeat == Recurrence.none) {
+    if (!block.repeat.active) {
       final bool yes = await showConfirm(
         context,
         title: 'Delete block?',
@@ -1422,6 +1488,18 @@ class _BlockEditorSheetState extends State<_BlockEditorSheet> {
       setState(() => _error = 'End must be after start.');
       return;
     }
+    if (_repeat.isDaily && _repeat.days.isEmpty) {
+      setState(
+        () => _error = 'Tick at least one day, or choose Does not repeat.',
+      );
+      return;
+    }
+    if (_repeat.isHourly && _repeat.hours.isEmpty) {
+      setState(
+        () => _error = 'Tick at least one hour, or choose Does not repeat.',
+      );
+      return;
+    }
     final String title = _title.text.trim().isEmpty
         ? 'Untitled'
         : _title.text.trim();
@@ -1432,7 +1510,7 @@ class _BlockEditorSheetState extends State<_BlockEditorSheet> {
       start: _start,
       end: _end,
       kind: _kind,
-      alarm: _alarm,
+      alarms: _alarms,
       repeat: _repeat,
       seriesId: original?.seriesId,
       lane: original?.lane,
@@ -1465,8 +1543,8 @@ class _BatchEditorSheetState extends State<_BatchEditorSheet> {
   late bool _durationOn = false;
   late String _trackId;
   late BlockKind _kind;
-  late bool _alarm;
-  late Recurrence _repeat;
+  late Set<AlarmOffset> _alarms;
+  late RepeatSpec _repeat;
   int _durationDelta = 0;
   late final TextEditingController _titleController;
 
@@ -1479,7 +1557,12 @@ class _BatchEditorSheetState extends State<_BatchEditorSheet> {
     final Block first = widget.blocks.first;
     _trackId = first.trackId;
     _kind = first.kind;
-    _alarm = first.alarm;
+    _alarms =
+        widget.blocks.every(
+          (Block block) => setEquals(block.alarms, first.alarms),
+        )
+        ? Set<AlarmOffset>.of(first.alarms)
+        : <AlarmOffset>{};
     _repeat = first.repeat;
     final String firstTitle = first.title;
     final bool sameTitle = widget.blocks.every(
@@ -1597,42 +1680,68 @@ class _BatchEditorSheetState extends State<_BatchEditorSheet> {
           ),
           const SizedBox(height: 9),
           _BatchFieldCard(
-            label: 'Alarm',
+            label: 'Notifications',
             value: _alarmOn,
             onChanged: (bool value) => setState(() => _alarmOn = value),
-            child: Row(
-              children: <Widget>[
-                const Expanded(
-                  child: Text(
-                    'Notify at the start time',
-                    style: TextStyle(fontSize: 11.5),
-                  ),
-                ),
-                Switch.adaptive(
-                  value: _alarm,
-                  onChanged: (bool value) => setState(() => _alarm = value),
-                  activeTrackColor: AppColors.alpha(AppColors.accent, .7),
-                ),
-              ],
+            child: _NotificationPicker(
+              alarms: _alarms,
+              onChanged: (Set<AlarmOffset> value) =>
+                  setState(() => _alarms = value),
             ),
           ),
           const SizedBox(height: 9),
           _BatchFieldCard(
             label: 'Repeat',
             value: _repeatOn,
-            onChanged: (bool value) => setState(() => _repeatOn = value),
-            child: _DropdownBox<Recurrence>(
-              value: _repeat,
-              items: <DropdownMenuItem<Recurrence>>[
-                for (final Recurrence value in Recurrence.values)
-                  DropdownMenuItem<Recurrence>(
-                    value: value,
-                    child: Text(value.label),
+            onChanged: (bool value) => setState(() {
+              _repeatOn = value;
+              if (value && _repeat.mode == RepeatCadence.none) {
+                _repeat = const RepeatSpec.daily();
+              }
+            }),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: <Widget>[
+                _DropdownBox<RepeatCadence>(
+                  value: _repeat.mode,
+                  items: const <DropdownMenuItem<RepeatCadence>>[
+                    DropdownMenuItem<RepeatCadence>(
+                      value: RepeatCadence.none,
+                      child: Text('Does not repeat'),
+                    ),
+                    DropdownMenuItem<RepeatCadence>(
+                      value: RepeatCadence.daily,
+                      child: Text('Daily'),
+                    ),
+                    DropdownMenuItem<RepeatCadence>(
+                      value: RepeatCadence.hourly,
+                      child: Text('Hourly'),
+                    ),
+                  ],
+                  onChanged: (RepeatCadence? value) {
+                    if (value != null) {
+                      setState(() => _repeat = _repeatWithMode(value));
+                    }
+                  },
+                ),
+                if (_repeat.isDaily) ...<Widget>[
+                  const SizedBox(height: 8),
+                  _WeekdayPicker(
+                    selected: _repeat.days,
+                    onChanged: (Set<int> days) =>
+                        setState(() => _repeat = _repeat.copyWith(days: days)),
                   ),
+                ],
+                if (_repeat.isHourly) ...<Widget>[
+                  const SizedBox(height: 8),
+                  _HourPicker(
+                    selected: _repeat.hours,
+                    onChanged: (Set<int> hours) => setState(
+                      () => _repeat = _repeat.copyWith(hours: hours),
+                    ),
+                  ),
+                ],
               ],
-              onChanged: (Recurrence? value) {
-                if (value != null) setState(() => _repeat = value);
-              },
             ),
           ),
           const SizedBox(height: 9),
@@ -1684,14 +1793,49 @@ class _BatchEditorSheetState extends State<_BatchEditorSheet> {
     );
   }
 
+  RepeatSpec _repeatWithMode(RepeatCadence mode) {
+    final DateTime anchor = widget.blocks.first.start;
+    switch (mode) {
+      case RepeatCadence.none:
+        return RepeatSpec.none;
+      case RepeatCadence.daily:
+        return RepeatSpec(
+          mode: RepeatCadence.daily,
+          days: _repeat.isDaily && _repeat.days.isNotEmpty
+              ? _repeat.days
+              : RepeatSpec.allDays,
+        );
+      case RepeatCadence.hourly:
+        return RepeatSpec(
+          mode: RepeatCadence.hourly,
+          hours: _repeat.isHourly && _repeat.hours.isNotEmpty
+              ? _repeat.hours
+              : <int>{anchor.hour},
+        );
+    }
+  }
+
+  RepeatSpec _repeatForApply() {
+    if (!_repeat.active) return RepeatSpec.none;
+    final DateTime anchor = widget.blocks.first.start;
+    if (_repeat.isDaily) {
+      return _repeat.days.isEmpty
+          ? _repeat.copyWith(days: <int>{anchor.weekday})
+          : _repeat;
+    }
+    return _repeat.hours.isEmpty
+        ? _repeat.copyWith(hours: <int>{anchor.hour})
+        : _repeat;
+  }
+
   void _apply() {
     store.batchEditBlocks(
       _ids,
       trackId: _trackOn ? _trackId : null,
       title: _titleOn ? _titleController.text : null,
       kind: _kindOn ? _kind : null,
-      alarm: _alarmOn ? _alarm : null,
-      repeat: _repeatOn ? _repeat : null,
+      alarms: _alarmOn ? _alarms : null,
+      repeat: _repeatOn ? _repeatForApply() : null,
       durationDeltaMinutes: _durationOn ? _durationDelta : 0,
     );
     Navigator.of(context).pop(true);
@@ -1771,6 +1915,193 @@ class _BatchFieldCard extends StatelessWidget {
           ),
           if (value) ...<Widget>[const SizedBox(height: 8), child],
         ],
+      ),
+    );
+  }
+}
+
+class _NotificationPicker extends StatelessWidget {
+  const _NotificationPicker({required this.alarms, required this.onChanged});
+
+  final Set<AlarmOffset> alarms;
+  final ValueChanged<Set<AlarmOffset>> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(10, 9, 10, 10),
+      decoration: BoxDecoration(
+        color: const Color(0xFF11151B),
+        borderRadius: BorderRadius.circular(9),
+        border: Border.all(color: AppColors.line),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          const Row(
+            children: <Widget>[
+              Icon(Icons.notifications_none, size: 15, color: AppColors.muted),
+              SizedBox(width: 7),
+              Expanded(
+                child: Text(
+                  'Notify me',
+                  style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600),
+                ),
+              ),
+              Text(
+                'Default sound',
+                style: TextStyle(fontSize: 9, color: AppColors.faint),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: <Widget>[
+              for (final AlarmOffset offset in AlarmOffset.values)
+                _TickChip(
+                  label: offset.label,
+                  selected: alarms.contains(offset),
+                  onTap: () {
+                    final Set<AlarmOffset> next = Set<AlarmOffset>.of(alarms);
+                    if (!next.add(offset)) next.remove(offset);
+                    onChanged(next);
+                  },
+                ),
+            ],
+          ),
+          const SizedBox(height: 7),
+          const Text(
+            'Uses the device notification sound. Alerts fire while Timeline is '
+            'open or running in the background.',
+            style: TextStyle(
+              fontSize: 9.5,
+              height: 1.35,
+              color: AppColors.faint,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _WeekdayPicker extends StatelessWidget {
+  const _WeekdayPicker({required this.selected, required this.onChanged});
+
+  final Set<int> selected;
+  final ValueChanged<Set<int>> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Wrap(
+      spacing: 5,
+      runSpacing: 5,
+      children: <Widget>[
+        for (int day = DateTime.monday; day <= DateTime.sunday; day++)
+          _TickChip(
+            label: RepeatSpec.shortWeekday(day),
+            selected: selected.contains(day),
+            onTap: () {
+              final Set<int> next = Set<int>.of(selected);
+              if (!next.add(day)) next.remove(day);
+              onChanged(next);
+            },
+          ),
+      ],
+    );
+  }
+}
+
+class _HourPicker extends StatelessWidget {
+  const _HourPicker({required this.selected, required this.onChanged});
+
+  final Set<int> selected;
+  final ValueChanged<Set<int>> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Wrap(
+      spacing: 5,
+      runSpacing: 5,
+      children: <Widget>[
+        for (int hour = 0; hour < 24; hour++)
+          _TickChip(
+            label: RepeatSpec.hourLabel(hour),
+            selected: selected.contains(hour),
+            onTap: () {
+              final Set<int> next = Set<int>.of(selected);
+              if (!next.add(hour)) next.remove(hour);
+              onChanged(next);
+            },
+          ),
+      ],
+    );
+  }
+}
+
+class _TickChip extends StatelessWidget {
+  const _TickChip({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: selected
+          ? AppColors.alpha(AppColors.accent, .16)
+          : const Color(0xFF151A21),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(7),
+        side: BorderSide(
+          color: selected
+              ? AppColors.alpha(AppColors.accent, .55)
+              : AppColors.line,
+        ),
+      ),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(7),
+        child: SizedBox(
+          height: 30,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                SizedBox(
+                  width: 13,
+                  child: selected
+                      ? const Icon(
+                          Icons.check,
+                          size: 12,
+                          color: AppColors.accent,
+                        )
+                      : null,
+                ),
+                const SizedBox(width: 4),
+                Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: 10.5,
+                    fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+                    color: selected ? AppColors.text : AppColors.muted,
+                    fontFeatures: const <FontFeature>[
+                      FontFeature.tabularFigures(),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }

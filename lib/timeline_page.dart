@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -404,6 +405,90 @@ class TimelinePageState extends State<TimelinePage> {
     }
   }
 
+  Future<void> _combineSelection() async {
+    if (store.locked) {
+      await showAppToast(
+        context,
+        'Layout is locked — unlock to combine blocks',
+      );
+      return;
+    }
+    final List<Block> selected =
+        store.blocks
+            .where((Block block) => _selectedIds.contains(block.id))
+            .toList(growable: false)
+          ..sort((Block a, Block b) => a.start.compareTo(b.start));
+    if (selected.length < 2) return;
+    final Block first = selected.first;
+    DateTime end = first.end;
+    for (final Block block in selected) {
+      if (block.end.isAfter(end)) end = block.end;
+    }
+    final Duration span = end.difference(first.start);
+    final String earliestLabel = first.title.length <= 24
+        ? first.title
+        : '${first.title.substring(0, 23)}…';
+    final String choice =
+        (await showDialog<String>(
+          context: context,
+          builder: (BuildContext context) => AlertDialog(
+            title: Text(
+              'Combine ${selected.length} blocks?',
+              style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+            ),
+            content: Text(
+              'One block will span ${fmtDayLong(first.start)} '
+              '${fmtTime(first.start)} → ${fmtDayLong(end)} ${fmtTime(end)} '
+              '(${fmtDuration(span)}). Choose the name it keeps.',
+              style: const TextStyle(
+                fontSize: 12,
+                height: 1.45,
+                color: AppColors.muted,
+              ),
+            ),
+            actions: <Widget>[
+              TextButton(
+                onPressed: () => Navigator.of(context).pop('cancel'),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.of(context).pop('earliest'),
+                child: Text(
+                  'Use “$earliestLabel”',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              TextButton(
+                onPressed: () => Navigator.of(context).pop('titles'),
+                child: const Text('Combine names'),
+              ),
+            ],
+          ),
+        )) ??
+        'cancel';
+    if (!mounted || choice == 'cancel') return;
+    final Block? combined = store.combineBlocks(
+      _selectedIds,
+      joinTitles: choice == 'titles',
+    );
+    if (!mounted || combined == null) return;
+    setState(() {
+      _selectedIds
+        ..clear()
+        ..add(combined.id);
+      _selecting = false;
+    });
+    _ensureVisible(combined);
+    await showAppToast(
+      context,
+      'Combined into “${combined.title}” · '
+      '${fmtTime(combined.start)}–${fmtTime(combined.end)}',
+      actionLabel: 'Undo',
+      onAction: () => store.undo(),
+    );
+  }
+
   Future<void> _saveSelectionAsTemplate() async {
     final List<Block> selected = store.blocks
         .where((Block block) => _selectedIds.contains(block.id))
@@ -489,6 +574,13 @@ class TimelinePageState extends State<TimelinePage> {
                 const SizedBox(width: 5),
                 if (multi) ...<Widget>[
                   AppIconButton(
+                    icon: Icons.merge_type,
+                    tooltip: 'Combine selected blocks',
+                    onPressed: _combineSelection,
+                    size: 32,
+                  ),
+                  const SizedBox(width: 5),
+                  AppIconButton(
                     icon: Icons.bookmark_add_outlined,
                     tooltip: 'Save selection as template',
                     onPressed: _saveSelectionAsTemplate,
@@ -559,13 +651,10 @@ class TimelinePageState extends State<TimelinePage> {
                 ),
               ),
               const SizedBox(height: 2),
-              Text(
+              _HintText(
                 Platform.isAndroid
                     ? 'Tap blocks to add or remove · tap empty space to clear'
                     : 'Ctrl+click to add · Shift+drag to box select · Esc clears',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 10.5, color: AppColors.muted),
               ),
             ],
           ),
@@ -610,11 +699,8 @@ class TimelinePageState extends State<TimelinePage> {
                 ],
               ),
               const SizedBox(height: 2),
-              const Text(
+              const _HintText(
                 'Tap more blocks to add them · tap empty space to clear',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(fontSize: 10.5, color: AppColors.muted),
               ),
             ],
           ),
@@ -626,7 +712,7 @@ class TimelinePageState extends State<TimelinePage> {
   Widget _selectedHeader(Block block, Track track) {
     final String subtitle =
         '${fmtTime(block.start)}–${fmtTime(block.end)} · '
-        '${blockMeta(block, _now)} · ${track.name}';
+        '${blockTiming(block, _now)} · ${track.name}';
     return Row(
       children: <Widget>[
         Container(
@@ -1415,6 +1501,126 @@ class _NowButton extends StatelessWidget {
               ),
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A one-line header hint. Short hints render as plain text; when the hint is
+/// wider than the space left by the action buttons it slowly scrolls across
+/// once so nothing is permanently hidden behind the buttons. Dragging it also
+/// scrolls manually and stops the automatic pass.
+class _HintText extends StatefulWidget {
+  const _HintText(this.text);
+
+  final String text;
+
+  @override
+  State<_HintText> createState() => _HintTextState();
+}
+
+class _HintTextState extends State<_HintText>
+    with SingleTickerProviderStateMixin {
+  final ScrollController _scroll = ScrollController();
+  late final AnimationController _slide = AnimationController(vsync: this);
+  bool _started = false;
+
+  static const TextStyle _style = TextStyle(
+    fontSize: 10.5,
+    color: AppColors.muted,
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    _slide.addListener(_applySlide);
+  }
+
+  @override
+  void didUpdateWidget(covariant _HintText oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.text == widget.text) return;
+    _slide.reset();
+    _started = false;
+    _schedule();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _schedule();
+  }
+
+  void _schedule() {
+    WidgetsBinding.instance.addPostFrameCallback((_) => _beginSlide());
+  }
+
+  void _beginSlide() {
+    if (!mounted || _started || !_scroll.hasClients) return;
+    final double distance = _scroll.position.maxScrollExtent;
+    if (distance <= 1) return;
+    _started = true;
+    _slide.duration = Duration(
+      milliseconds: math.max(5200, (distance * 55).round()),
+    );
+    _slide.forward(from: 0);
+  }
+
+  /// Holds at the start, glides to the end, holds, and returns. A finite pass
+  /// keeps the header calm and never leaves the start of the hint off-screen.
+  void _applySlide() {
+    if (!_scroll.hasClients) return;
+    final double distance = _scroll.position.maxScrollExtent;
+    if (distance <= 0) return;
+    final double t = _slide.value;
+    double position;
+    if (t <= .08) {
+      position = 0;
+    } else if (t < .42) {
+      position = Curves.easeInOut.transform((t - .08) / .34);
+    } else if (t <= .58) {
+      position = 1;
+    } else if (t < .92) {
+      position = 1 - Curves.easeInOut.transform((t - .58) / .34);
+    } else {
+      position = 0;
+    }
+    _scroll.jumpTo(position * distance);
+  }
+
+  @override
+  void dispose() {
+    _slide.dispose();
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return NotificationListener<ScrollNotification>(
+      onNotification: (ScrollNotification notification) {
+        if (notification is ScrollStartNotification &&
+            notification.dragDetails != null) {
+          _slide.stop();
+        }
+        return false;
+      },
+      child: ScrollConfiguration(
+        behavior: ScrollConfiguration.of(context).copyWith(
+          scrollbars: false,
+          dragDevices: <PointerDeviceKind>{
+            PointerDeviceKind.touch,
+            PointerDeviceKind.mouse,
+            PointerDeviceKind.stylus,
+            PointerDeviceKind.trackpad,
+          },
+        ),
+        child: SingleChildScrollView(
+          controller: _scroll,
+          scrollDirection: Axis.horizontal,
+          physics: const ClampingScrollPhysics(),
+          child: Text(widget.text, maxLines: 1, softWrap: false, style: _style),
         ),
       ),
     );

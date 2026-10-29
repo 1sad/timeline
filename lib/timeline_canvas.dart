@@ -77,6 +77,7 @@ class _TimelineCanvasState extends State<TimelineCanvas> {
   Set<int> _dragIds = <int>{};
   bool _dragVertical = false;
   Map<int, int> _dragLanes = <int, int>{};
+  double _grabOffsetY = 0;
   UndoState? _before;
   DateTime? _originalStart;
   DateTime? _originalEnd;
@@ -87,6 +88,10 @@ class _TimelineCanvasState extends State<TimelineCanvas> {
   Timer? _longPressTimer;
   bool _longPressTriggered = false;
   bool _pointerStartedOnSelected = false;
+  List<int> _tapHits = <int>[];
+  int? _tapBlockId;
+  Block? _editOnTapUp;
+  bool _additiveToggle = false;
 
   DateTime? _panStartView;
   double _panStartHours = 24;
@@ -161,6 +166,7 @@ class _TimelineCanvasState extends State<TimelineCanvas> {
     }
 
     for (final TimelineSegment segment in widget.layout.segments) {
+      if (widget.selectedIds.contains(segment.block.id)) continue;
       if (!widget.layout.isVisible(segment.start, segment.end)) continue;
       final Rect rect = widget.layout.segmentRect(segment);
       if (rect.width <= 0) continue;
@@ -177,7 +183,34 @@ class _TimelineCanvasState extends State<TimelineCanvas> {
             rect: rect,
             track: track,
             now: widget.now,
-            selected: widget.selectedIds.contains(segment.block.id),
+            selected: false,
+            collapsed: metric.collapsed,
+          ),
+        ),
+      );
+    }
+
+    // Selected blocks are painted last so they sit above overlapping blocks
+    // and the block under the pointer matches what the user sees.
+    for (final TimelineSegment segment in widget.layout.segments) {
+      if (!widget.selectedIds.contains(segment.block.id)) continue;
+      if (!widget.layout.isVisible(segment.start, segment.end)) continue;
+      final Rect rect = widget.layout.segmentRect(segment);
+      if (rect.width <= 0) continue;
+      final Track track = widget.store.trackOrUncategorized(segment.trackId);
+      final TrackMetrics metric = widget.layout.metrics[segment.trackId]!;
+      children.add(
+        Positioned(
+          left: rect.left,
+          top: rect.top,
+          width: rect.width,
+          height: rect.height,
+          child: _BlockChip(
+            segment: segment,
+            rect: rect,
+            track: track,
+            now: widget.now,
+            selected: true,
             collapsed: metric.collapsed,
           ),
         ),
@@ -353,6 +386,9 @@ class _TimelineCanvasState extends State<TimelineCanvas> {
     _panAxis = 0;
     _longPressTriggered = false;
     _pointerStartedOnSelected = false;
+    _tapBlockId = null;
+    _editOnTapUp = null;
+    _additiveToggle = false;
     _cancelLongPress();
 
     final Offset position = event.localPosition;
@@ -375,47 +411,101 @@ class _TimelineCanvasState extends State<TimelineCanvas> {
       return;
     }
 
-    final TimelineSegment? segment = widget.layout.hitTest(position);
-    if (segment != null) {
-      final Block block = segment.block;
+    final List<TimelineSegment> rawHits = widget.layout.hitTestAll(position);
+    final List<TimelineSegment> hits = <TimelineSegment>[
+      ...rawHits.where(
+        (TimelineSegment segment) =>
+            widget.selectedIds.contains(segment.block.id),
+      ),
+      ...rawHits.where(
+        (TimelineSegment segment) =>
+            !widget.selectedIds.contains(segment.block.id),
+      ),
+    ];
+    _tapHits = hits
+        .map((TimelineSegment segment) => segment.block.id)
+        .toList(growable: false);
+
+    if (hits.isNotEmpty) {
+      final Block block = hits.first.block;
+      _grabOffsetY =
+          event.localPosition.dy -
+          widget.layout.segmentRect(hits.first).center.dy;
+      _tapBlockId = block.id;
       _dragBlock = block;
       _originalStart = block.start;
       _originalEnd = block.end;
       _dragPxPerHour = widget.layout.pxPerHour;
-      _dragIds = Set<int>.of(widget.selectedIds);
-      _pointerStartedOnSelected = _dragIds.contains(block.id);
+      _pointerStartedOnSelected = widget.selectedIds.contains(block.id);
       final bool additive =
           HardwareKeyboard.instance.isControlPressed ||
           HardwareKeyboard.instance.isMetaPressed ||
           (widget.selectionMode &&
               defaultTargetPlatform == TargetPlatform.android);
       if (additive) {
-        widget.onSelect(block.id, toggle: true);
-        _dragBlock = null;
+        if (event.kind == PointerDeviceKind.mouse) {
+          widget.onSelect(block.id, toggle: true);
+          _dragBlock = null;
+          _tapHits = <int>[];
+          return;
+        }
+        // On touch, toggle on release so an add-mode drag can still move a
+        // selection.
+        _tapBlockId = block.id;
+        _additiveToggle = true;
+        if (_pointerStartedOnSelected && !widget.store.locked) {
+          _dragIds = Set<int>.of(widget.selectedIds);
+          _dragVertical = _selectionAllowsVertical(_dragIds);
+          _dragLanes = <int, int>{
+            for (final TimelineSegment item in widget.layout.segments)
+              item.block.id: item.lane,
+          };
+          _mode = _Interaction.pendingBlock;
+        } else {
+          _dragBlock = null;
+          _mode = _Interaction.pan;
+          _panStartView = widget.layout.viewStart;
+          _panStartHours = widget.layout.hours;
+          _panPxPerHour = widget.layout.pxPerHour;
+          _panScrollStart = widget.scrollController.hasClients
+              ? widget.scrollController.offset
+              : 0;
+        }
         return;
       }
-      if (!_pointerStartedOnSelected) {
-        _dragIds = <int>{block.id};
-        widget.onSelect(block.id, toggle: false);
-      }
-      _dragVertical = _selectionAllowsVertical(_dragIds);
-      _dragLanes = <int, int>{
-        for (final TimelineSegment item in widget.layout.segments)
-          item.block.id: item.lane,
-      };
 
       final DateTime now = DateTime.now();
       final bool doubleTap =
           _lastTapId == block.id &&
           _lastTapAt != null &&
           now.difference(_lastTapAt!) < const Duration(milliseconds: 360);
-      _lastTapId = block.id;
-      _lastTapAt = now;
       if (doubleTap) {
-        _mode = _Interaction.none;
-        widget.onEdit(block);
+        // Wait for pointer up so a quick tap-then-drag moves the block instead
+        // of opening the editor.
+        _editOnTapUp = block;
+      }
+
+      if (!_pointerStartedOnSelected) {
+        // The first tap only selects, and the selection happens on release so
+        // a scroll that starts on a block does not grab it. Dragging pans.
+        _dragBlock = null;
+        _mode = _Interaction.pan;
+        _panStartView = widget.layout.viewStart;
+        _panStartHours = widget.layout.hours;
+        _panPxPerHour = widget.layout.pxPerHour;
+        _panScrollStart = widget.scrollController.hasClients
+            ? widget.scrollController.offset
+            : 0;
+        _startLongPress(block.id, event);
         return;
       }
+
+      _dragIds = Set<int>.of(widget.selectedIds);
+      _dragVertical = _selectionAllowsVertical(_dragIds);
+      _dragLanes = <int, int>{
+        for (final TimelineSegment item in widget.layout.segments)
+          item.block.id: item.lane,
+      };
       if (!widget.store.locked) {
         _mode = _Interaction.pendingBlock;
         _startLongPress(block.id, event);
@@ -444,16 +534,9 @@ class _TimelineCanvasState extends State<TimelineCanvas> {
   }
 
   bool _selectionAllowsVertical(Set<int> ids) {
-    if (ids.isEmpty) return false;
-    final List<Block> selected = widget.store.blocks
-        .where((Block block) => ids.contains(block.id))
-        .toList(growable: false);
-    if (selected.isEmpty) return false;
-    final String trackId = selected.first.trackId;
-    final bool zone = selected.first.isZone;
-    return selected.every(
-      (Block block) => block.trackId == trackId && block.isZone == zone,
-    );
+    // Each block moves inside its own category and shape stack, so a mixed
+    // selection can still be dragged vertically as one user gesture.
+    return ids.isNotEmpty;
   }
 
   void _startLongPress(int blockId, PointerDownEvent event) {
@@ -464,11 +547,19 @@ class _TimelineCanvasState extends State<TimelineCanvas> {
     _longPressTimer = Timer(const Duration(milliseconds: 420), () {
       if (!mounted) return;
       _longPressTriggered = true;
+      _rememberTap(null);
       _mode = _Interaction.none;
       _cancelLongPress();
       HapticFeedback.mediumImpact();
       widget.onLongPressSelect(blockId);
     });
+  }
+
+  /// Records the last completed tap so the next press can be recognised as a
+  /// double tap. Drags call this with null to break the chain.
+  void _rememberTap(int? blockId) {
+    _lastTapId = blockId;
+    _lastTapAt = blockId == null ? null : DateTime.now();
   }
 
   void _cancelLongPress() {
@@ -629,6 +720,12 @@ class _TimelineCanvasState extends State<TimelineCanvas> {
     widget.store.updateGroupMove(
       deltaMs: start.difference(_originalStart!).inMilliseconds,
       laneDelta: laneDelta,
+      // Vertical movement follows the drag direction so an upward drag can
+      // never be pushed down past the blocker. Horizontal moves still use the
+      // grab point to choose above or below the event being crossed.
+      preferAbove: laneDelta != 0
+          ? laneDelta < 0
+          : (_grabOffsetY.abs() >= 8 ? _grabOffsetY < 0 : dy < 0),
     );
   }
 
@@ -675,6 +772,7 @@ class _TimelineCanvasState extends State<TimelineCanvas> {
   void _onPointerUp(PointerUpEvent event) {
     _pointers.remove(event.pointer);
     _cancelLongPress();
+    if (_moved) _rememberTap(null);
     if (_mode == _Interaction.pinch) {
       if (_pointers.length < 2) {
         _mode = _Interaction.none;
@@ -707,13 +805,45 @@ class _TimelineCanvasState extends State<TimelineCanvas> {
     if (_mode == _Interaction.pendingBlock &&
         !_moved &&
         !_longPressTriggered &&
-        _pointerStartedOnSelected &&
-        widget.selectedIds.length > 1 &&
         _dragBlock != null) {
-      widget.onSelect(_dragBlock!.id, toggle: false);
+      final int id = _dragBlock!.id;
+      final Block? edit = _editOnTapUp;
+      if (_additiveToggle) {
+        _rememberTap(null);
+        widget.onSelect(id, toggle: true);
+      } else if (edit != null) {
+        _rememberTap(null);
+        widget.onEdit(edit);
+      } else if (widget.selectedIds.length > 1) {
+        _rememberTap(id);
+        widget.onSelect(id, toggle: false);
+      } else if (_tapHits.length > 1) {
+        final int index = _tapHits.indexOf(id);
+        final int next = index < 0
+            ? id
+            : _tapHits[(index + 1) % _tapHits.length];
+        _rememberTap(next);
+        if (next != id) widget.onSelect(next, toggle: false);
+      } else {
+        _rememberTap(id);
+      }
     }
-    if (_mode == _Interaction.pan && !_moved && _downWasEmpty) {
-      widget.onClearSelection();
+    if (_mode == _Interaction.pan && !_moved) {
+      final int? id = _tapBlockId;
+      final Block? edit = _editOnTapUp;
+      if (_additiveToggle) {
+        _rememberTap(null);
+        if (id != null) widget.onSelect(id, toggle: true);
+      } else if (edit != null) {
+        _rememberTap(null);
+        widget.onEdit(edit);
+      } else if (id != null) {
+        _rememberTap(id);
+        widget.onSelect(id, toggle: false);
+      } else if (_downWasEmpty) {
+        _rememberTap(null);
+        widget.onClearSelection();
+      }
     }
     _resetInteraction();
   }
@@ -765,9 +895,14 @@ class _TimelineCanvasState extends State<TimelineCanvas> {
     _dragIds = <int>{};
     _dragVertical = false;
     _dragLanes = <int, int>{};
+    _grabOffsetY = 0;
     _before = null;
     _downWasEmpty = false;
     _pointerStartedOnSelected = false;
+    _tapHits = <int>[];
+    _tapBlockId = null;
+    _editOnTapUp = null;
+    _additiveToggle = false;
     _cancelLongPress();
     if (_marqueeRect != null && mounted) {
       setState(() {
